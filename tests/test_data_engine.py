@@ -1,15 +1,18 @@
 """数据引擎属性测试。"""
 
+import logging
 import sqlite3
 import tempfile
 from contextlib import closing
 from datetime import date
 from pathlib import Path
+from unittest.mock import MagicMock, patch
 
 import pandas as pd
 from hypothesis import given, settings as h_settings
 from hypothesis import strategies as st
 
+import sequoia_x.data.engine as engine_module
 from sequoia_x.core.config import Settings
 from sequoia_x.data.engine import DataEngine
 
@@ -54,3 +57,88 @@ def test_unique_symbol_date_constraint(symbol: str, trade_date: date) -> None:
                 (symbol, str(trade_date)),
             ).fetchone()[0]
         assert count == 1
+
+
+def _capture_engine_logs() -> tuple[list[logging.LogRecord], logging.Handler]:
+    """engine logger 设置了 propagate=False，caplog 收不到，得直接挂 handler。"""
+    records: list[logging.LogRecord] = []
+
+    class _ListHandler(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            records.append(record)
+
+    handler = _ListHandler(logging.WARNING)
+    logging.getLogger(engine_module.__name__).addHandler(handler)
+    return records, handler
+
+
+def _run_sync_with(engine: DataEngine, batch_results: list) -> tuple[int, list[logging.LogRecord]]:
+    """在给定的 worker 返回值下跑一次 sync_today_bulk。
+
+    Pool 用 spawn 启动，子进程会重新 import 本模块，所以 patch
+    _bs_fetch_batch 对子进程无效——必须把整个 Pool 换掉。
+    """
+    pool = MagicMock()
+    pool.__enter__.return_value.map.return_value = batch_results
+    records, handler = _capture_engine_logs()
+    try:
+        with patch("multiprocessing.Pool", return_value=pool):
+            written = engine.sync_today_bulk()
+    finally:
+        logging.getLogger(engine_module.__name__).removeHandler(handler)
+    return written, records
+
+
+def _seed_one_stale_symbol(engine: DataEngine) -> None:
+    """写一条很旧的记录，让 sync_today_bulk 认为有东西要更新。"""
+    with closing(sqlite3.connect(engine.db_path)) as conn, conn:
+        conn.execute(
+            "INSERT INTO stock_daily (symbol, date, open, high, low, close, volume, turnover) "
+            "VALUES ('600519', '2024-01-02', 1, 1, 1, 1, 1, 1)"
+        )
+
+
+# Feature: sequoia-x-v2, Property 33: 数据源全挂与非交易日必须可区分
+def test_total_fetch_failure_logs_error_not_no_data() -> None:
+    """属性 33：所有拉取都失败时记 ERROR，而不是"无新数据（可能非交易日）"。
+
+    这两种情况在数据上完全一样（一行都没拿到），含义却天差地别：
+    后者是正常的休市，前者意味着策略即将基于过期数据选股。
+    实测撞见过——8 个 worker 同时连 baostock 全部被拒，2000 次查询逐个超时，
+    而日志只有一条 INFO。cron 每天这样跑，没人会发现。
+    """
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        engine, _ = make_engine_in(tmp_dir)
+        _seed_one_stale_symbol(engine)
+
+        written, records = _run_sync_with(engine, [([], {"ok": 0, "failed": 250})])
+
+    assert written == 0
+    errors = [r for r in records if r.levelno == logging.ERROR]
+    assert errors, "全部失败却没有记 ERROR"
+    assert "数据源不可用" in errors[0].getMessage()
+
+
+def test_genuine_non_trading_day_stays_quiet() -> None:
+    """查询都成功但没有新 K 线，是正常的非交易日，不该报错。"""
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        engine, _ = make_engine_in(tmp_dir)
+        _seed_one_stale_symbol(engine)
+
+        written, records = _run_sync_with(engine, [([], {"ok": 250, "failed": 0})])
+
+    assert written == 0
+    assert not [r for r in records if r.levelno >= logging.WARNING]
+
+
+def test_partial_fetch_failure_warns() -> None:
+    """部分失败要留下 WARNING：数据不完整，但不至于让整轮停下。"""
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        engine, _ = make_engine_in(tmp_dir)
+        _seed_one_stale_symbol(engine)
+
+        written, records = _run_sync_with(engine, [([], {"ok": 200, "failed": 50})])
+
+    assert written == 0
+    warnings = [r for r in records if r.levelno == logging.WARNING]
+    assert warnings and "部分失败" in warnings[0].getMessage()

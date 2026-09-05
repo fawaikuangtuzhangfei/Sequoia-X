@@ -81,26 +81,51 @@ CREATE TABLE IF NOT EXISTS stock_basic (
 """
 
 
-def _bs_fetch_batch(tasks: list) -> list:
-    """多进程 worker：独立 login，批量拉取 baostock 数据。"""
+def _bs_fetch_batch(tasks: list) -> tuple[list, dict[str, int]]:
+    """多进程 worker：独立 login，批量拉取 baostock 数据。
+
+    **必须把失败计数回传给父进程。** 这些 worker 跑在独立进程里，它们的日志
+    未必能汇总；而在此之前失败是完全静默的：login 连不上、每次查询超时，
+    最终都只表现为"没有数据"，与真正的非交易日无法区分。
+
+    实测过这个场景：8 个 worker 同时连 baostock 时全部被拒，2000 次查询
+    逐个超时，父进程照常记一条 INFO"无新数据（可能非交易日）"。cron 每天
+    这样跑，策略会一直用过期数据选股，而没有任何告警。
+
+    Returns:
+        (数据行, {"ok": 成功只数, "failed": 失败只数})。
+    """
     import baostock as bs
-    bs.login()
+
+    stats = {"ok": 0, "failed": 0}
+
+    lg = bs.login()
+    if lg.error_code != "0":
+        # 连不上就别再逐只重试了，整批直接记为失败
+        stats["failed"] = len(tasks)
+        return [], stats
+
     results = []
-    for symbol, bs_code, start, end in tasks:
-        rs = bs.query_history_k_data_plus(
-            bs_code,
-            "date,open,high,low,close,volume,amount",
-            start_date=start,
-            end_date=end,
-            frequency="d",
-            adjustflag="1",  # 后复权
-        )
-        if rs.error_code != "0":
-            continue
-        while rs.next():
-            results.append([symbol] + rs.get_row_data())
-    bs.logout()
-    return results
+    try:
+        for symbol, bs_code, start, end in tasks:
+            rs = bs.query_history_k_data_plus(
+                bs_code,
+                "date,open,high,low,close,volume,amount",
+                start_date=start,
+                end_date=end,
+                frequency="d",
+                adjustflag="1",  # 后复权
+            )
+            if rs.error_code != "0":
+                stats["failed"] += 1
+                continue
+            while rs.next():
+                results.append([symbol] + rs.get_row_data())
+            stats["ok"] += 1
+    finally:
+        bs.logout()
+
+    return results, stats
 
 
 class DataEngine:
@@ -187,11 +212,27 @@ class DataEngine:
             batch_results = pool.map(_bs_fetch_batch, chunks)
 
         all_rows = []
-        for batch in batch_results:
+        n_ok = 0
+        n_failed = 0
+        for batch, stats in batch_results:
             all_rows.extend(batch)
+            n_ok += stats["ok"]
+            n_failed += stats["failed"]
+
+        # 全军覆没和"今天休市"在数据上长得一模一样，但含义天差地别：
+        # 前者意味着策略即将用过期数据选股，必须吵起来。
+        if n_failed and not n_ok:
+            logger.error(
+                f"baostock 拉取全部失败（{n_failed} 只），本次同步没有拿到任何数据。"
+                "这不是非交易日，是数据源不可用——策略将基于过期数据运行。"
+            )
+            return 0
+
+        if n_failed:
+            logger.warning(f"baostock 拉取部分失败：成功 {n_ok} 只，失败 {n_failed} 只")
 
         if not all_rows:
-            logger.info("无新数据（可能非交易日）")
+            logger.info(f"无新数据，可能是非交易日（{n_ok} 只查询成功但都没有新 K 线）")
             return 0
 
         df = pd.DataFrame(all_rows, columns=["symbol", "date", "open", "high", "low", "close", "volume", "turnover"])
