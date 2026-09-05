@@ -81,18 +81,69 @@ python main.py
 
 ---
 
+## Web 界面 | Web UI
+
+除飞书推送外，选股结果会写入数据库，可通过网页翻阅历史记录。
+`main.py` 与 Web 服务是两个独立进程，共用同一个 SQLite 文件，
+**不启 Web 服务完全不影响选股和推送**。
+
+### 构建并启动
+
+```bash
+cd frontend && npm install && npm run build && cd ..
+python serve.py
+```
+
+浏览器打开 <http://127.0.0.1:8000>。
+
+默认只监听 `127.0.0.1`（仅本机）。需要内网其它机器访问时：
+
+```bash
+python serve.py --host 0.0.0.0 --port 8000
+```
+
+> 接口没有鉴权，**请勿直接暴露到公网**。
+
+### 前端开发模式
+
+```bash
+python serve.py            # 终端 1：后端
+cd frontend && npm run dev # 终端 2：前端，带热更新
+```
+
+开发态访问 Vite 给出的地址（默认 <http://127.0.0.1:5173>），
+`/api` 请求由 `vite.config.ts` 的 proxy 转发到后端。
+
+`frontend/dist` 不存在时，`serve.py` 会自动降级为纯 API 服务——
+只想用接口、不想装 Node 的话可以跳过整个构建步骤。
+
+### 接口
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| GET | `/api/health` | 存活检查 |
+| GET | `/api/dates` | 有选股数据的日期，倒序 |
+| GET | `/api/strategies` | 有选股数据的策略名 |
+| GET | `/api/selections` | 查询选股结果，支持 `date` / `strategy` / `page` / `page_size` |
+
+交互式文档见 <http://127.0.0.1:8000/docs>。
+
+---
+
 ## 目录结构 | Project Structure
 
 ```
 Sequoia-X/
 ├── main.py                      # 入口：argparse 分发日常/回填模式
+├── serve.py                     # 入口：启动 Web 查询服务
 ├── pyproject.toml               # 依赖声明 + ruff/pytest 配置
 ├── .env.example                 # 环境变量模板
 ├── data/                        # SQLite 数据库（运行时生成，不入 git）
 ├── sequoia_x/
 │   ├── core/
 │   │   ├── config.py            # Pydantic-settings 配置管理
-│   │   └── logger.py            # rich 结构化日志
+│   │   ├── logger.py            # rich 结构化日志
+│   │   └── symbols.py           # 股票代码格式转换
 │   ├── data/
 │   │   └── engine.py            # 数据引擎（baostock 回填 + 增量同步 + SQLite）
 │   ├── strategy/
@@ -102,9 +153,20 @@ Sequoia-X/
 │   │   ├── high_tight_flag.py   # 高窄旗形策略
 │   │   ├── limit_up_shakeout.py # 涨停洗盘策略
 │   │   ├── uptrend_limit_down.py # 上升跌停策略
-│   │   └── rps_breakout.py      # RPS 突破策略
-│   └── notify/
-│       └── feishu.py            # 飞书 Webhook 推送
+│   │   ├── rps_breakout.py      # RPS 突破策略
+│   │   └── private_placement.py # 定增公告监控策略
+│   ├── notify/
+│   │   └── feishu.py            # 飞书 Webhook 推送
+│   └── api/                     # 选股结果只读查询接口（FastAPI）
+│       ├── app.py               # create_app()：路由 + 静态资源挂载
+│       ├── schemas.py           # 响应模型
+│       ├── deps.py              # 依赖注入
+│       └── routers/selections.py
+├── frontend/                    # 结果浏览页面（React + TypeScript + Vite）
+│   └── src/
+│       ├── api.ts               # 接口封装
+│       ├── App.tsx              # 状态编排
+│       └── components/          # Filters / SelectionList
 └── tests/                       # 属性测试（hypothesis）
 ```
 
