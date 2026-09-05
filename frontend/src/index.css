@@ -1,132 +1,513 @@
+/* Sequoia-X 选股结果浏览页
+ *
+ * 视觉基调：账簿 / 行情单。凹陷的纸底 + 更亮的记录行，而不是白卡片浮在灰底上。
+ * 朱红全页只出现在"共振"一处——A 股红涨绿跌，红是本地语汇，用得越少越有分量。
+ * 页面不展示任何价格，因此青色用于结构不会被误读成"跌"。
+ */
+
 :root {
-  font-family: -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
-  color: #1f2328;
-  background: #f6f8fa;
+  --paper: #e8e8e2;        /* 纸底：冷灰绿，比常见的米白更灰更暗 */
+  --paper-raised: #f4f4ef; /* 记录行：比纸底亮，像贴上去的条 */
+  --paper-sunken: #dededa;
+
+  --ink: #14161a;          /* 墨：偏冷的近黑 */
+  --ink-soft: #4a4d52;
+  --ink-faint: #85877f;
+
+  --zhu: #c8322a;          /* 朱：涨 / 共振。全页唯一的高饱和色 */
+  --zhu-wash: #f6e6e3;
+  --qing: #2e6e63;         /* 青：结构与次要标记 */
+
+  --line: #cfcfc8;
+  --line-strong: #b6b6ad;
+
+  --font-sans: "PingFang SC", "HarmonyOS Sans SC", "Hiragino Sans GB",
+    "Microsoft YaHei", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: ui-monospace, "Cascadia Mono", "JetBrains Mono", "SF Mono",
+    Menlo, Consolas, "Courier New", monospace;
+
+  --rail-w: 176px;
+}
+
+* {
+  box-sizing: border-box;
 }
 
 body {
   margin: 0;
+  background: var(--paper);
+  color: var(--ink);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
 }
 
-.app {
-  max-width: 900px;
+a {
+  color: inherit;
+  text-decoration: none;
+}
+
+:focus-visible {
+  outline: 2px solid var(--zhu);
+  outline-offset: 2px;
+}
+
+/* 通用小标签：拉开字距，压小字号，永远不抢主体 */
+.label {
+  font-size: 11px;
+  letter-spacing: 0.16em;
+  color: var(--ink-faint);
+  text-transform: uppercase;
+}
+
+/* ── 骨架 ───────────────────────────────────────────── */
+
+.shell {
+  display: grid;
+  grid-template-columns: var(--rail-w) minmax(0, 1fr);
+  min-height: 100vh;
+  max-width: 1080px;
   margin: 0 auto;
-  padding: 24px 16px 48px;
 }
 
-h1 {
-  font-size: 20px;
-  margin: 0 0 20px;
+.main {
+  padding: 40px 32px 96px;
+  min-width: 0;
 }
 
-.filters {
+/* ── 左栏：交易日 ───────────────────────────────────── */
+
+.rail {
+  border-right: 1px solid var(--line);
+  padding: 40px 0 40px 4px;
+}
+
+.rail-brand {
+  padding: 0 16px 28px;
+}
+
+.rail-brand b {
+  display: block;
+  font-size: 13px;
+  font-weight: 800;
+  letter-spacing: 0.02em;
+}
+
+.rail-brand span {
+  display: block;
+  margin-top: 2px;
+  font-size: 11px;
+  color: var(--ink-faint);
+  letter-spacing: 0.08em;
+}
+
+.rail-head {
+  padding: 0 16px 10px;
+}
+
+.rail-month {
+  padding: 16px 16px 6px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--ink-faint);
+  letter-spacing: 0.1em;
+}
+
+.rail-month:first-of-type {
+  padding-top: 0;
+}
+
+.rail-day {
+  display: block;
+  width: 100%;
+  border: 0;
+  background: none;
+  text-align: left;
+  padding: 7px 16px;
+  font-family: var(--font-mono);
+  font-size: 14px;
+  color: var(--ink-soft);
+  cursor: pointer;
+  border-left: 2px solid transparent;
+}
+
+.rail-day:hover {
+  color: var(--ink);
+  background: var(--paper-sunken);
+}
+
+.rail-day[aria-current="true"] {
+  color: var(--ink);
+  font-weight: 700;
+  border-left-color: var(--zhu);
+  background: var(--paper-sunken);
+}
+
+.rail-empty {
+  padding: 0 16px;
+  font-size: 12px;
+  color: var(--ink-faint);
+  line-height: 1.6;
+}
+
+/* ── 主视觉：日期 ───────────────────────────────────── */
+
+.daymark {
   display: flex;
+  align-items: baseline;
   gap: 16px;
   flex-wrap: wrap;
-  margin-bottom: 16px;
+  padding-bottom: 22px;
+  border-bottom: 1px solid var(--line-strong);
 }
 
-.filters label {
+.daymark-date {
+  font-family: var(--font-mono);
+  font-size: 76px;
+  font-weight: 700;
+  line-height: 0.86;
+  letter-spacing: -0.045em;
+}
+
+.daymark-meta {
   display: flex;
-  align-items: center;
-  gap: 8px;
-  font-size: 14px;
-  color: #57606a;
+  flex-direction: column;
+  gap: 3px;
+  padding-bottom: 4px;
 }
 
-.filters select {
-  padding: 6px 8px;
+.daymark-year {
+  font-family: var(--font-mono);
+  font-size: 13px;
+  color: var(--ink-soft);
+  letter-spacing: 0.06em;
+}
+
+.daymark-count {
+  font-size: 13px;
+  color: var(--ink-soft);
+}
+
+.daymark-count b {
+  font-family: var(--font-mono);
+  font-weight: 700;
+  color: var(--ink);
+}
+
+/* ── 签名元素：共振 ─────────────────────────────────── */
+
+.resonance {
+  margin: 26px 0 0;
+  border-left: 3px solid var(--zhu);
+  background: var(--zhu-wash);
+  padding: 14px 18px 16px;
+}
+
+.resonance-head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+
+.resonance-head .title {
+  font-size: 13px;
+  font-weight: 800;
+  color: var(--zhu);
+  letter-spacing: 0.04em;
+}
+
+.resonance-head .note {
+  font-size: 12px;
+  color: var(--ink-soft);
+}
+
+.resonance-item {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  flex-wrap: wrap;
+  padding: 5px 0;
+}
+
+.resonance-item + .resonance-item {
+  border-top: 1px solid rgba(200, 50, 42, 0.16);
+}
+
+.resonance-code {
+  font-family: var(--font-mono);
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--zhu);
+  border-bottom: 1px solid transparent;
+}
+
+.resonance-code:hover {
+  border-bottom-color: var(--zhu);
+}
+
+.resonance-name {
   font-size: 14px;
-  border: 1px solid #d0d7de;
-  border-radius: 6px;
+  min-width: 88px;
+}
+
+/* 标签紧跟名称，不靠 margin-left:auto 推到最右——只有一条共振时，
+   那样会拉出一大片空白，读起来像两栏无关内容。 */
+.resonance-tags {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.resonance-tag {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--ink-soft);
+  border: 1px solid rgba(200, 50, 42, 0.28);
+  padding: 1px 7px;
+}
+
+.resonance-tag b {
+  color: var(--zhu);
+  font-weight: 700;
+}
+
+/* ── 策略筛选 ───────────────────────────────────────── */
+
+.tabs {
+  display: flex;
+  gap: 0;
+  flex-wrap: wrap;
+  margin: 30px 0 4px;
+  border-bottom: 1px solid var(--line);
+}
+
+.tab {
+  border: 0;
+  background: none;
+  cursor: pointer;
+  font-family: inherit;
+  font-size: 13px;
+  color: var(--ink-faint);
+  padding: 8px 14px 9px;
+  margin-bottom: -1px;
+  border-bottom: 2px solid transparent;
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
+}
+
+.tab:hover {
+  color: var(--ink);
+}
+
+.tab[aria-selected="true"] {
+  color: var(--ink);
+  font-weight: 700;
+  border-bottom-color: var(--qing);
+}
+
+.tab .n {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--ink-faint);
+}
+
+.tab[aria-selected="true"] .n {
+  color: var(--qing);
+}
+
+/* ── 结果列表 ───────────────────────────────────────── */
+
+.strat {
+  margin-top: 30px;
+}
+
+.strat-head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  padding-bottom: 8px;
+}
+
+.strat-name {
+  font-size: 14px;
+  font-weight: 800;
+  letter-spacing: 0.01em;
+}
+
+.strat-rule {
+  flex: 1;
+  height: 1px;
+  background: var(--line);
+}
+
+.strat-n {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--ink-faint);
+}
+
+.rows {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.row {
+  display: grid;
+  grid-template-columns: 34px 78px minmax(0, 1fr) 44px;
+  align-items: center;
+  gap: 14px;
+  background: var(--paper-raised);
+  padding: 9px 14px;
+  animation: rise 0.22s cubic-bezier(0.2, 0.7, 0.3, 1) backwards;
+  animation-delay: calc(var(--i) * 16ms);
+}
+
+.row:hover {
   background: #fff;
 }
 
-.filters select:disabled {
-  background: #f6f8fa;
-  color: #8c959f;
+.row-rank {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--ink-faint);
 }
 
-.summary {
-  font-size: 13px;
-  color: #57606a;
-  margin: 0 0 8px;
+.row-code {
+  font-family: var(--font-mono);
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
 }
+
+.row-name {
+  font-size: 14px;
+  color: var(--ink-soft);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.row-name.is-missing {
+  color: var(--ink-faint);
+}
+
+/* 共振标记：与顶部共振区同一种红，扫列表时能对上号 */
+.row-mark {
+  font-size: 11px;
+  color: var(--zhu);
+  background: var(--zhu-wash);
+  padding: 2px 6px;
+  justify-self: end;
+}
+
+/* 去掉了每行的 ↗ 之后，靠底色与代码变色给出可点击的反馈 */
+.row:hover .row-code {
+  color: var(--qing);
+}
+
+@keyframes rise {
+  from {
+    opacity: 0;
+    transform: translateY(5px);
+  }
+}
+
+/* ── 状态 ───────────────────────────────────────────── */
 
 .state {
-  padding: 32px 0;
-  text-align: center;
-  color: #57606a;
+  margin-top: 44px;
+  padding: 30px 0;
+  border-top: 1px solid var(--line);
   font-size: 14px;
+  color: var(--ink-soft);
+  line-height: 1.7;
+}
+
+.state code {
+  font-family: var(--font-mono);
+  font-size: 13px;
+  background: var(--paper-sunken);
+  padding: 1px 6px;
 }
 
 .state-error {
-  color: #cf222e;
+  border-top-color: var(--zhu);
+  color: var(--zhu);
 }
 
-.results {
-  width: 100%;
-  border-collapse: collapse;
-  background: #fff;
-  border: 1px solid #d0d7de;
-  border-radius: 6px;
-  overflow: hidden;
-  font-size: 14px;
+.state-error code {
+  background: var(--zhu-wash);
+  color: var(--zhu);
 }
 
-.results th,
-.results td {
-  padding: 8px 12px;
-  text-align: left;
-  border-bottom: 1px solid #d8dee4;
+.truncated {
+  margin-top: 18px;
+  font-size: 12px;
+  color: var(--ink-faint);
 }
 
-.results th {
-  background: #f6f8fa;
-  font-weight: 600;
-  color: #57606a;
+/* ── 响应式 ─────────────────────────────────────────── */
+
+@media (max-width: 720px) {
+  .shell {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .rail {
+    border-right: 0;
+    border-bottom: 1px solid var(--line);
+    padding: 20px 0 0;
+    display: flex;
+    flex-direction: column;
+  }
+
+  .rail-brand,
+  .rail-head {
+    padding-bottom: 12px;
+  }
+
+  .rail-month {
+    display: none;
+  }
+
+  .rail-days {
+    display: flex;
+    overflow-x: auto;
+    gap: 2px;
+    padding: 0 12px 12px;
+  }
+
+  .rail-day {
+    width: auto;
+    white-space: nowrap;
+    border-left: 0;
+    border-bottom: 2px solid transparent;
+    padding: 6px 12px;
+  }
+
+  .rail-day[aria-current="true"] {
+    border-left: 0;
+    border-bottom-color: var(--zhu);
+  }
+
+  .main {
+    padding: 26px 18px 72px;
+  }
+
+  .daymark-date {
+    font-size: 56px;
+  }
+
+  .row {
+    grid-template-columns: 30px 72px minmax(0, 1fr) 40px;
+    gap: 10px;
+  }
 }
 
-.results tbody:last-child tr:last-child td {
-  border-bottom: none;
+@media (prefers-reduced-motion: reduce) {
+  .row {
+    animation: none;
+  }
 }
-
-.results tr.group th {
-  background: #fbfcfd;
-  font-weight: 600;
-  color: #1f2328;
-  border-top: 1px solid #d0d7de;
-}
-
-.results tbody:first-of-type tr.group th {
-  border-top: none;
-}
-
-.results tr.group .count {
-  margin-left: 8px;
-  font-weight: 400;
-  color: #8c959f;
-}
-
-.results a {
-  color: #0969da;
-  text-decoration: none;
-  font-variant-numeric: tabular-nums;
-}
-
-.results a:hover {
-  text-decoration: underline;
-}
-
-.results .num {
-  width: 48px;
-  color: #8c959f;
-  font-variant-numeric: tabular-nums;
-}
-
-/* 代码列定宽，剩余空间留给名称，避免名称被推到表格最右侧 */
-.results th:nth-child(2),
-.results td:nth-child(2) {
-  width: 88px;
-}
-
