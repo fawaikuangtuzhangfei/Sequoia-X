@@ -36,6 +36,11 @@ def main() -> None:
         action="store_true",
         help="回填模式：通过 baostock 拉取全市场历史 K 线（约12分钟）",
     )
+    parser.add_argument(
+        "--refresh-names",
+        action="store_true",
+        help="仅刷新股票名称表（stock_basic），约几秒，供 Web 页面展示名称",
+    )
     args = parser.parse_args()
 
     try:
@@ -55,6 +60,16 @@ def main() -> None:
             all_symbols = engine.get_all_symbols()
             engine.backfill(all_symbols)
             logger.info("Sequoia-X V2 回填模式运行完成")
+            return
+
+        if args.refresh_names:
+            # ── 仅刷新名称表 ──
+            # get_all_symbols() 会顺手把 (代码, 名称) 写入 stock_basic。
+            # 名称平时只在 --backfill 时被动填充，只跑日常模式的用户
+            # 需要这个独立入口，否则 Web 页面上永远显示不出股票名称。
+            logger.info("刷新股票名称表...")
+            symbols = engine.get_all_symbols()
+            logger.info(f"Sequoia-X V2 名称刷新完成，覆盖 {len(symbols)} 只股票")
             return
 
         # ── 日常模式：单次 API 补今天 + 策略 + 推送 ──

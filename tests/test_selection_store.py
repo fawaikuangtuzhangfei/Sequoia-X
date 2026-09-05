@@ -215,3 +215,36 @@ def test_save_failure_does_not_break_notification(error_msg: str) -> None:
 
     assert engine.save_selection.call_count == len(_STRATEGY_ATTRS)
     assert notifier.send.call_count == len(_STRATEGY_ATTRS)
+
+
+def test_refresh_names_skips_strategies_and_notification() -> None:
+    """--refresh-names 只刷新名称表，不同步行情、不跑策略、不推送。
+
+    名称平时只在 --backfill 时被动填充。只跑日常模式的用户需要这个入口，
+    否则 Web 页面上永远显示不出股票名称。它必须是纯粹的旁路模式——
+    误触发一轮选股推送会直接骚扰到飞书群。
+    """
+    import main as main_module
+
+    settings = Settings(
+        db_path="data/unused.db",
+        start_date="2024-01-01",
+        feishu_webhook_url="https://example.com/hook",
+    )
+    engine = MagicMock()
+    engine.get_all_symbols.return_value = ["600519", "000001"]
+    notifier = MagicMock()
+
+    with contextlib.ExitStack() as stack:
+        stack.enter_context(patch.object(main_module, "get_settings", return_value=settings))
+        stack.enter_context(patch.object(main_module, "DataEngine", return_value=engine))
+        stack.enter_context(patch.object(main_module, "FeishuNotifier", return_value=notifier))
+        stack.enter_context(patch("sys.argv", ["main.py", "--refresh-names"]))
+
+        main_module.main()
+
+    assert engine.get_all_symbols.call_count == 1
+    assert engine.sync_today_bulk.call_count == 0
+    assert engine.backfill.call_count == 0
+    assert engine.save_selection.call_count == 0
+    assert notifier.send.call_count == 0
