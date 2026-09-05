@@ -35,6 +35,39 @@ def main() -> None:
         action="store_true",
         help="仅刷新股票名称表（stock_basic），约几秒，供 Web 页面展示名称",
     )
+    parser.add_argument(
+        "--track-returns",
+        action="store_true",
+        help="为已有选股结果补算 T+N 收益与超额，并打印汇总报表",
+    )
+    parser.add_argument(
+        "--replay",
+        action="store_true",
+        help="历史回放：按 as-of 日期重跑策略，产出历史选股样本",
+    )
+    parser.add_argument(
+        "--from",
+        dest="date_from",
+        default=None,
+        help="回放起始日期 YYYY-MM-DD，缺省为本地行情最早的交易日",
+    )
+    parser.add_argument(
+        "--to",
+        dest="date_to",
+        default=None,
+        help="回放结束日期 YYYY-MM-DD，缺省为本地行情最新的交易日",
+    )
+    parser.add_argument(
+        "--source",
+        choices=["live", "replay"],
+        default="live",
+        help="--track-returns 的样本来源：live=实盘推荐，replay=历史回放",
+    )
+    parser.add_argument(
+        "--recompute",
+        action="store_true",
+        help="配合 --track-returns：清空该来源的旧收益明细后全量重算",
+    )
     args = parser.parse_args()
 
     try:
@@ -64,6 +97,35 @@ def main() -> None:
             logger.info("刷新股票名称表...")
             symbols = engine.get_all_symbols()
             logger.info(f"Sequoia-X V2 名称刷新完成，覆盖 {len(symbols)} 只股票")
+            return
+
+        if args.replay:
+            # ── 回放模式：按历史日期重跑策略，产出可供收益跟踪的历史样本 ──
+            # 结果写 selection_replay，绝不碰 selection_result——
+            # 那张表是实盘推荐的事实记录。
+            from sequoia_x.backtest.replay import replay_range
+
+            logger.info("进入历史回放模式...")
+            picks = replay_range(
+                engine, settings, start=args.date_from, end=args.date_to
+            )
+            logger.info(f"Sequoia-X V2 回放完成，共写入 {picks} 条历史选股样本")
+            logger.info("接着跑 `python main.py --track-returns --source replay` 出收益")
+            return
+
+        if args.track_returns:
+            # ── 收益跟踪模式：补算收益并打印报表 ──
+            from sequoia_x.backtest.tracker import print_report, track_returns
+
+            logger.info(f"开始补算收益（source={args.source}）...")
+            stats = track_returns(
+                engine, source=args.source, recompute=args.recompute
+            )
+            logger.info(
+                f"收益补算完成：新增 {stats.computed} 条明细，"
+                f"未到期 {stats.immature} 条"
+            )
+            print_report(engine, source=args.source)
             return
 
         # ── 日常模式：单次 API 补今天 + 策略 + 推送 ──

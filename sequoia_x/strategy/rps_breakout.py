@@ -1,7 +1,7 @@
 import pandas as pd
-import sqlite3
-from sequoia_x.strategy.base import BaseStrategy
+
 from sequoia_x.core.logger import get_logger
+from sequoia_x.strategy.base import BaseStrategy
 
 logger = get_logger(__name__)
 
@@ -29,9 +29,13 @@ class RpsBreakoutStrategy(BaseStrategy):
     )
 
     def run(self) -> list[str]:
+        # 走 engine 的公开读方法而不是自己开一条 sqlite 连接：
+        # 裸连接绕过了数据层，历史回放时无法把可见数据截断到 as-of 日期，
+        # 策略会读到未来的行情。engine 侧的边界违规记录见 data spec。
         try:
-            with sqlite3.connect(self.engine.db_path) as conn:
-                df = pd.read_sql("SELECT symbol, date, close, high FROM stock_daily", conn)
+            df = self.engine.get_market_ohlcv(
+                columns=("symbol", "date", "close", "high")
+            )
         except Exception as exc:
             logger.error(f"读取数据库失败: {exc}")
             return []
