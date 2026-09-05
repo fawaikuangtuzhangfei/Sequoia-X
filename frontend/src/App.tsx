@@ -6,12 +6,16 @@ import { DateRail } from './components/DateRail'
 import { DayHeader } from './components/DayHeader'
 import { Resonance } from './components/Resonance'
 import { SelectionList } from './components/SelectionList'
+import { StrategyGuide } from './components/StrategyGuide'
 import { StrategyTabs } from './components/StrategyTabs'
 
 export default function App() {
   const [dates, setDates] = useState<string[]>([])
   const [date, setDate] = useState<string | null>(null)
   const [strategy, setStrategy] = useState<string | null>(null)
+  // 说明是一个视图切换而不是一条路由：只有两个视图，引入路由库
+  // 换不来任何东西，还会破坏"运行时依赖只有 react"的约束。
+  const [guideOpen, setGuideOpen] = useState(false)
   const [page, setPage] = useState<SelectionPage | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -78,17 +82,31 @@ export default function App() {
   const shownGroups = strategy ? groups.filter((g) => g.strategy === strategy) : groups
   const truncated = page !== null && page.total > page.items.length
 
+  const strategiesToday = useMemo(
+    () => new Set(groups.map((g) => g.strategy)),
+    [groups],
+  )
+
   const pickDate = (next: string) => {
     setDate(next)
     setStrategy(null) // 换天后旧的策略筛选多半不适用，重置更可预期
+    setGuideOpen(false)
   }
 
   return (
     <div className="shell">
-      <DateRail dates={dates} active={date} onPick={pickDate} />
+      <DateRail
+        dates={dates}
+        active={date}
+        guideOpen={guideOpen}
+        onPick={pickDate}
+        onOpenGuide={() => setGuideOpen(true)}
+      />
 
       <main className="main">
-        {error ? (
+        {guideOpen ? (
+          <StrategyGuide activeToday={strategiesToday} />
+        ) : error ? (
           <p className="state state-error">
             {error}
             <br />

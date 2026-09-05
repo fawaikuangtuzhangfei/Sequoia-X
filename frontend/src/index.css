@@ -149,6 +149,22 @@ a {
   line-height: 1.6;
 }
 
+.rail-foot {
+  margin-top: 26px;
+  padding-top: 14px;
+  border-top: 1px solid var(--line);
+}
+
+/* 说明入口用青色区分：它切换的是视图，不是选一天 */
+.rail-guide {
+  font-family: var(--font-sans);
+  font-size: 13px;
+}
+
+.rail-guide[aria-current="true"] {
+  border-left-color: var(--qing);
+}
+
 /* ── 主视觉：日期 ───────────────────────────────────── */
 
 .daymark {
@@ -347,6 +363,21 @@ a {
   color: var(--ink-faint);
 }
 
+.strat-class {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--ink-faint);
+}
+
+/* 策略一句话：结果列表里的就地解答，完整判据在策略说明视图 */
+.strat-note {
+  margin: 0 0 12px;
+  max-width: 62ch;
+  font-size: 12.5px;
+  line-height: 1.65;
+  color: var(--ink-faint);
+}
+
 .rows {
   display: flex;
   flex-direction: column;
@@ -412,6 +443,138 @@ a {
     opacity: 0;
     transform: translateY(5px);
   }
+}
+
+/* ── 策略说明视图 ───────────────────────────────────── */
+
+.guide-head {
+  padding-bottom: 22px;
+  border-bottom: 1px solid var(--line-strong);
+}
+
+.guide-head h1 {
+  margin: 0 0 10px;
+  font-size: 40px;
+  font-weight: 800;
+  letter-spacing: -0.02em;
+}
+
+.guide-head p {
+  margin: 0;
+  max-width: 52ch;
+  font-size: 13.5px;
+  line-height: 1.8;
+  color: var(--ink-soft);
+}
+
+.guide-head code,
+.guide-item code {
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+
+.guide-item {
+  padding: 26px 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.guide-item-head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.guide-item-head h2 {
+  margin: 0;
+  font-size: 17px;
+  font-weight: 800;
+}
+
+.guide-class {
+  color: var(--ink-faint);
+}
+
+.guide-live {
+  font-size: 11px;
+  color: var(--qing);
+  border: 1px solid rgba(46, 110, 99, 0.35);
+  padding: 1px 7px;
+}
+
+.guide-summary {
+  margin: 10px 0 0;
+  max-width: 56ch;
+  font-size: 14px;
+  line-height: 1.75;
+}
+
+/* 判据编号有意义：它们是源码里的判断顺序，不是装饰性的 01/02/03 */
+.guide-criteria {
+  margin: 14px 0 0;
+  padding-left: 0;
+  list-style: none;
+  counter-reset: c;
+  max-width: 60ch;
+}
+
+.guide-criteria li {
+  counter-increment: c;
+  position: relative;
+  padding-left: 26px;
+  margin-bottom: 6px;
+  font-size: 13.5px;
+  line-height: 1.7;
+  color: var(--ink-soft);
+}
+
+.guide-criteria li::before {
+  content: counter(c);
+  position: absolute;
+  left: 0;
+  top: 1px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--ink-faint);
+}
+
+.guide-meta {
+  display: grid;
+  grid-template-columns: 68px minmax(0, 1fr);
+  gap: 4px 14px;
+  margin: 16px 0 0;
+  max-width: 60ch;
+}
+
+.guide-meta dt {
+  font-size: 11px;
+  letter-spacing: 0.1em;
+  color: var(--ink-faint);
+  padding-top: 3px;
+}
+
+.guide-meta dd {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.65;
+  color: var(--ink-soft);
+}
+
+/* 注意事项用青色而不是朱红：朱红只留给共振，用第二次就不是信号了 */
+.guide-caveat {
+  margin: 16px 0 0;
+  max-width: 58ch;
+  border-left: 2px solid var(--qing);
+  padding-left: 12px;
+  font-size: 13px;
+  line-height: 1.7;
+  color: var(--ink-soft);
+}
+
+.guide-foot {
+  margin: 24px 0 0;
+  font-size: 12px;
+  color: var(--ink-faint);
 }
 
 /* ── 状态 ───────────────────────────────────────────── */
@@ -490,6 +653,29 @@ a {
   .rail-day[aria-current="true"] {
     border-left: 0;
     border-bottom-color: var(--zhu);
+  }
+
+  .rail-foot {
+    margin: 0;
+    padding: 0 12px 12px;
+    border-top: 0;
+  }
+
+  .rail-guide[aria-current="true"] {
+    border-bottom-color: var(--qing);
+  }
+
+  .guide-head h1 {
+    font-size: 30px;
+  }
+
+  .guide-meta {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 2px;
+  }
+
+  .guide-meta dd {
+    margin-bottom: 8px;
   }
 
   .main {

@@ -1,6 +1,7 @@
 /** 策略筛选。选项只来自当天真实跑出结果的策略，选了不会得到空列表。 */
 
 import { shortStrategy, type StrategyGroup } from '../format'
+import { docFor } from '../strategies'
 
 interface StrategyTabsProps {
   groups: StrategyGroup[]
@@ -36,7 +37,8 @@ export function StrategyTabs({ groups, active, total, onPick }: StrategyTabsProp
           aria-selected={active === group.strategy}
           onClick={() => onPick(group.strategy)}
         >
-          {shortStrategy(group.strategy)} <span className="n">{group.items.length}</span>
+          {docFor(group.strategy)?.title ?? shortStrategy(group.strategy)}{' '}
+          <span className="n">{group.items.length}</span>
         </button>
       ))}
     </div>

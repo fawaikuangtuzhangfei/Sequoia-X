@@ -1,16 +1,19 @@
-/** 左栏交易日导航。日期是这个工具的主索引，所以它不是下拉框而是常驻列表。 */
+/** 左栏导航。日期是这个工具的主索引，所以它不是下拉框而是常驻列表。 */
 
 import { groupDatesByMonth } from '../format'
 
 interface DateRailProps {
   dates: string[]
   active: string | null
+  /** 当前是否停留在策略说明视图 */
+  guideOpen: boolean
   onPick: (date: string) => void
+  onOpenGuide: () => void
 }
 
-export function DateRail({ dates, active, onPick }: DateRailProps) {
+export function DateRail({ dates, active, guideOpen, onPick, onOpenGuide }: DateRailProps) {
   return (
-    <nav className="rail" aria-label="交易日">
+    <nav className="rail" aria-label="导航">
       <div className="rail-brand">
         <b>SEQUOIA·X</b>
         <span>选股结果</span>
@@ -32,7 +35,7 @@ export function DateRail({ dates, active, onPick }: DateRailProps) {
                   key={date}
                   type="button"
                   className="rail-day"
-                  aria-current={date === active}
+                  aria-current={!guideOpen && date === active}
                   onClick={() => onPick(date)}
                 >
                   {date.slice(5)}
@@ -42,6 +45,19 @@ export function DateRail({ dates, active, onPick }: DateRailProps) {
           </div>
         ))
       )}
+
+      {/* 说明必须独立于结果页：当天没选出票的策略，在结果页里根本不出现，
+          而那些恰恰是最需要解释的。 */}
+      <div className="rail-foot">
+        <button
+          type="button"
+          className="rail-day rail-guide"
+          aria-current={guideOpen}
+          onClick={onOpenGuide}
+        >
+          策略说明
+        </button>
+      </div>
     </nav>
   )
 }
