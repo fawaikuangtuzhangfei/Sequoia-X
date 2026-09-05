@@ -77,7 +77,7 @@ def main() -> None:
             cls(engine=engine, settings=settings) for cls in STRATEGIES
         ]
 
-        notifier = FeishuNotifier(settings)
+        notifier = FeishuNotifier(settings, engine)
         today_str = date.today().strftime("%Y-%m-%d")
 
         # 5. 遍历策略，落库并推送至对应机器人

@@ -7,6 +7,7 @@ import requests
 
 from sequoia_x.core.config import Settings
 from sequoia_x.core.logger import get_logger
+from sequoia_x.data.engine import DataEngine
 
 logger = get_logger(__name__)
 
@@ -19,14 +20,16 @@ class FeishuNotifier:
     则 fallback 到 Settings.feishu_webhook_url。
     """
 
-    def __init__(self, settings: Settings) -> None:
+    def __init__(self, settings: Settings, engine: DataEngine) -> None:
         """
         初始化 FeishuNotifier。
 
         Args:
             settings: Settings 实例，提供 Webhook URL 配置。
+            engine: DataEngine 实例，用于查询股票名称。
         """
         self.settings = settings
+        self.engine = engine
 
     @staticmethod
     def _to_xueqiu_code(code: str) -> str:
@@ -37,20 +40,17 @@ class FeishuNotifier:
             return f"BJ{code}"
         return f"SZ{code}"
 
-    @staticmethod
-    def _get_stock_names(symbols: list[str]) -> dict[str, str]:
-        """通过 baostock 批量查询股票名称，返回 {code: name} 映射。"""
-        import baostock as bs
-        bs.login()
-        mapping = {}
-        for code in symbols:
-            prefix = "sh" if code.startswith(("6", "9")) else "sz"
-            rs = bs.query_stock_basic(code=f"{prefix}.{code}")
-            while rs.next():
-                row = rs.get_row_data()
-                mapping[code] = row[1]  # 第2个字段是股票名称
-        bs.logout()
-        return mapping
+    def _get_stock_names(self, symbols: list[str]) -> dict[str, str]:
+        """查询股票名称。失败时返回空字典——名称缺失只影响展示，不能挡住推送。
+
+        原先是对每只股票单独发一次 baostock 请求（N+1），且没有登录检查、
+        没有 try/finally。名称本就在 stock_basic 表里，改为一次读库。
+        """
+        try:
+            return self.engine.get_stock_names(symbols)
+        except Exception as exc:
+            logger.error(f"查询股票名称失败，降级为展示代码：{exc}")
+            return {}
 
     def _build_card(self, symbols: list[str], strategy_name: str) -> dict:
         today = date.today().strftime("%Y-%m-%d")

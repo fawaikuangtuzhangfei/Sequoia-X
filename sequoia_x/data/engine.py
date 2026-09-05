@@ -439,6 +439,41 @@ class DataEngine:
 
         return len(payload)
 
+    def get_stock_names(self, symbols: list[str]) -> dict[str, str]:
+        """
+        批量查询股票名称。
+
+        取代 notify 层原先"每只股票发一次 baostock 请求"的做法：一个策略选出
+        13 只就是 13 次网络往返，四个策略叠加，推送链路的耗时和失败面都被
+        放大了一个数量级。名称本来就在 stock_basic 表里。
+
+        Args:
+            symbols: 纯 6 位代码列表。
+
+        Returns:
+            {代码: 名称}。查不到的代码**不出现在结果里**，由调用方决定降级展示，
+            而不是在这里编一个占位符。stock_basic 为空时返回空字典。
+        """
+        if not symbols:
+            return {}
+
+        # SQLite 对单条语句的参数个数有上限（新版 32766，旧版 999），
+        # 分批查询，避免选股结果特别多时踩到这个限制。
+        chunk_size = 500
+        mapping: dict[str, str] = {}
+
+        with _connect(self.db_path) as conn:
+            for i in range(0, len(symbols), chunk_size):
+                chunk = symbols[i : i + chunk_size]
+                placeholders = ",".join("?" * len(chunk))
+                rows = conn.execute(
+                    f"SELECT symbol, name FROM stock_basic WHERE symbol IN ({placeholders})",
+                    chunk,
+                ).fetchall()
+                mapping.update({row[0]: row[1] for row in rows})
+
+        return mapping
+
     # ── 选股结果 ──
 
     def save_selection(self, run_date: str, strategy: str, symbols: list[str]) -> int:

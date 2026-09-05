@@ -8,11 +8,20 @@
 """
 
 import argparse
+import os
 
 import uvicorn
 from dotenv import load_dotenv
 
 from sequoia_x.api.app import create_app
+
+# 本服务不发任何通知，但 Settings 把 feishu_webhook_url 定为必填字段，
+# 只想开网页的人会被卡在一个跟自己无关的配置上。
+#
+# 兜底放在这里而不是放宽 Settings：那个必填约束是 main.py 的安全网
+# （漏配 webhook 就等于每天静默地不推送），tests/test_config.py 也在断言它。
+# setdefault 保证真实配置仍然优先。
+_PLACEHOLDER_WEBHOOK = "unused://serve-py-does-not-push"
 
 
 def main() -> None:
@@ -27,6 +36,7 @@ def main() -> None:
     # 必须在 create_app() 之前：Settings 在应用构造时才读环境变量。
     # 与 main.py 不同，这里无需放到 import 之前——没有任何模块在导入期读配置。
     load_dotenv()
+    os.environ.setdefault("FEISHU_WEBHOOK_URL", _PLACEHOLDER_WEBHOOK)
 
     uvicorn.run(create_app(), host=args.host, port=args.port)
 

@@ -156,6 +156,43 @@ def test_name_is_joined_and_nullable(known: list[str], unknown: list[str]) -> No
     assert all(by_symbol[s] is None for s in unknown)
 
 
+# Feature: sequoia-x-v2, Property 31: 名称批量查询只返回查得到的代码
+@given(
+    known=st.lists(_SYMBOL, min_size=1, max_size=6, unique=True),
+    unknown=st.lists(_SYMBOL, min_size=0, max_size=6, unique=True),
+)
+@h_settings(max_examples=25, deadline=None)
+def test_get_stock_names_returns_only_known(known: list[str], unknown: list[str]) -> None:
+    """属性 31：get_stock_names 只返回库里有的代码，查不到的不出现在结果里。
+
+    不给缺失的代码编占位符：调用方（飞书卡片、网页）各有各的降级方式，
+    在数据层硬塞一个假名字会让两边都失去选择。
+    """
+    unknown = [s for s in unknown if s not in known]
+
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        engine = make_engine_in(tmp_dir)
+        engine.upsert_stock_basic([(s, f"名称{s}") for s in known])
+        names = engine.get_stock_names(known + unknown)
+
+    assert names == {s: f"名称{s}" for s in known}
+    assert all(s not in names for s in unknown)
+
+
+def test_get_stock_names_handles_empty_and_large_input() -> None:
+    """空列表不查库；超过单批上限的输入要分批，不能踩到 SQLite 的参数个数限制。"""
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        engine = make_engine_in(tmp_dir)
+        assert engine.get_stock_names([]) == {}
+
+        # 1200 > 分批阈值 500，也超过旧版 SQLite 的 999 参数上限
+        many = [f"{i:06d}" for i in range(1200)]
+        engine.upsert_stock_basic([(s, f"名称{s}") for s in many])
+        names = engine.get_stock_names(many)
+
+    assert len(names) == 1200
+
+
 # ── main 流程的容错性 ──
 
 class _StubStrategy:
