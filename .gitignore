@@ -20,6 +20,9 @@ ENV/
 data/*.db
 data/*.db-wal
 data/*.db-shm
+# 数据库的压缩备份 / 导出（从服务器拷贝时会产生）
+data/*.gz
+data/*.zip
 
 # 环境变量
 .env
