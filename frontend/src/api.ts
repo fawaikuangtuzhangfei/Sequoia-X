@@ -24,11 +24,38 @@ export interface SelectionPage {
   items: SelectionItem[]
 }
 
+const UNREACHABLE_HINT = '无法连接后端服务，请确认已运行 python serve.py'
+
+/** 请求根本没到达后端（连接被拒，或被开发代理挡下）。 */
+export class BackendUnreachableError extends Error {
+  constructor() {
+    super(UNREACHABLE_HINT)
+    this.name = 'BackendUnreachableError'
+  }
+}
+
 async function getJson<T>(path: string): Promise<T> {
   const resp = await fetch(path)
+
   if (!resp.ok) {
-    throw new Error(`接口返回 ${resp.status}（${path}）`)
+    // 后端自己回的错一定带 {"detail": ...}（见 api/app.py 的异常处理器）。
+    // 后端没启动时 vite proxy 回的是**空 body 的 5xx**，解析不出 detail——
+    // 靠这个区分"后端报错了"和"根本没连上"，后者要给出可操作的提示。
+    const detail = await resp
+      .json()
+      .then((body: unknown) =>
+        typeof (body as { detail?: unknown })?.detail === 'string'
+          ? ((body as { detail: string }).detail)
+          : null,
+      )
+      .catch(() => null)
+
+    if (detail) {
+      throw new Error(`${detail}（${path}）`)
+    }
+    throw new BackendUnreachableError()
   }
+
   return (await resp.json()) as T
 }
 
@@ -55,12 +82,15 @@ export function fetchSelections(options: {
 /**
  * 把异常转成给用户看的中文提示。
  *
- * fetch 在后端没起来时抛的是 TypeError（"Failed to fetch"），
- * 直接展示这个英文串对用户毫无意义，必须翻译成可操作的提示。
+ * 后端连不上有两条路径，提示必须一致：
+ *   - 生产态（FastAPI 直供页面）：页面已加载后进程挂掉，fetch 抛 TypeError
+ *     （"Failed to fetch"），直接展示这个英文串对用户毫无意义
+ *   - 开发态（vite dev server）：proxy 把连接失败转成空 body 的 5xx，
+ *     由 getJson 归一成 BackendUnreachableError
  */
 export function describeError(error: unknown): string {
   if (error instanceof TypeError) {
-    return '无法连接后端服务，请确认已运行 python serve.py'
+    return UNREACHABLE_HINT
   }
   return error instanceof Error ? error.message : String(error)
 }

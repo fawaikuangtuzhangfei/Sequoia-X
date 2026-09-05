@@ -1,11 +1,36 @@
 /** 选股结果表格，含 loading / error / empty 三态。 */
 
-import type { SelectionPage } from '../api'
+import type { SelectionItem, SelectionPage } from '../api'
 
 interface SelectionListProps {
   loading: boolean
   error: string | null
   page: SelectionPage | null
+}
+
+interface StrategyGroup {
+  strategy: string
+  items: SelectionItem[]
+}
+
+/**
+ * 按策略把结果切成连续的分组。
+ *
+ * rank 是"该策略内的名次"，每个策略都从 0 重新开始。不分组直接平铺，
+ * 序号列会读成 1,2,1,2,3,1,2,3,4 —— 看起来像坏了。
+ * 接口已按 (策略, rank) 排好序，所以这里只需按相邻相同项切段。
+ */
+function groupByStrategy(items: SelectionItem[]): StrategyGroup[] {
+  const groups: StrategyGroup[] = []
+  for (const item of items) {
+    const last = groups[groups.length - 1]
+    if (last && last.strategy === item.strategy) {
+      last.items.push(item)
+    } else {
+      groups.push({ strategy: item.strategy, items: [item] })
+    }
+  }
+  return groups
 }
 
 export function SelectionList({ loading, error, page }: SelectionListProps) {
@@ -40,32 +65,39 @@ export function SelectionList({ loading, error, page }: SelectionListProps) {
       <table className="results">
         <thead>
           <tr>
-            <th>序号</th>
+            <th className="num">序号</th>
             <th>代码</th>
             <th>名称</th>
-            <th>策略</th>
           </tr>
         </thead>
-        <tbody>
-          {page.items.map((item) => (
-            // rank 只在同一策略内唯一，所以键要带上策略名
-            <tr key={`${item.strategy}-${item.symbol}`}>
-              <td className="num">{item.rank + 1}</td>
-              <td>
-                <a
-                  href={`https://xueqiu.com/S/${item.xueqiu_code}`}
-                  target="_blank"
-                  rel="noreferrer"
-                >
-                  {item.symbol}
-                </a>
-              </td>
-              {/* 名称来自 stock_basic，查不到时降级显示占位符而不是空白 */}
-              <td>{item.name ?? '—'}</td>
-              <td className="strategy">{item.strategy}</td>
+        {groupByStrategy(page.items).map((group) => (
+          // 每个策略一个 tbody：分组标题让"序号从 1 重新开始"变得显而易见
+          <tbody key={group.strategy}>
+            <tr className="group">
+              <th colSpan={3}>
+                {group.strategy}
+                <span className="count">{group.items.length} 只</span>
+              </th>
             </tr>
-          ))}
-        </tbody>
+            {group.items.map((item) => (
+              // rank 只在同一策略内唯一，所以键要带上策略名
+              <tr key={`${item.strategy}-${item.symbol}`}>
+                <td className="num">{item.rank + 1}</td>
+                <td>
+                  <a
+                    href={`https://xueqiu.com/S/${item.xueqiu_code}`}
+                    target="_blank"
+                    rel="noreferrer"
+                  >
+                    {item.symbol}
+                  </a>
+                </td>
+                {/* 名称来自 stock_basic，查不到时降级显示占位符而不是空白 */}
+                <td>{item.name ?? '—'}</td>
+              </tr>
+            ))}
+          </tbody>
+        ))}
       </table>
     </>
   )
