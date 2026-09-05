@@ -74,14 +74,23 @@ def main() -> None:
         ]
 
         notifier = FeishuNotifier(settings)
+        today_str = date.today().strftime("%Y-%m-%d")
 
-        # 5. 遍历策略，有结果则推送至对应机器人
+        # 5. 遍历策略，落库并推送至对应机器人
         for strategy in strategies:
             strategy_name = type(strategy).__name__
             logger.info(f"执行策略：{strategy_name}")
 
             selected: list[str] = strategy.run()
             logger.info(f"{strategy_name} 选出 {len(selected)} 只股票")
+
+            # 持久化选股结果。必须包住异常：main 不单独包裹每个策略，
+            # 任何逃逸异常会终止整轮运行，让后续策略全部不执行。
+            # 落库是次要功能，不能拖累飞书推送这条主链路。
+            try:
+                engine.save_selection(today_str, strategy_name, selected)
+            except Exception as exc:
+                logger.error(f"{strategy_name} 选股结果写库失败：{exc}")
 
             if selected:
                 notifier.send(

@@ -54,6 +54,32 @@ _CREATE_INDEX_SQL = """
 CREATE INDEX IF NOT EXISTS idx_symbol_date ON stock_daily (symbol, date);
 """
 
+# rank 保存 run() 返回列表中的下标：策略输出顺序是有意义的
+# （海龟按流通市值降序、定增按公告日期降序），不存下来等于丢失结果的一部分。
+_CREATE_SELECTION_TABLE_SQL = """
+CREATE TABLE IF NOT EXISTS selection_result (
+    id       INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_date TEXT    NOT NULL,
+    strategy TEXT    NOT NULL,
+    symbol   TEXT    NOT NULL,
+    rank     INTEGER NOT NULL,
+    UNIQUE (run_date, strategy, symbol)
+);
+"""
+
+_CREATE_SELECTION_INDEX_SQL = """
+CREATE INDEX IF NOT EXISTS idx_selection_date_strategy
+    ON selection_result (run_date, strategy);
+"""
+
+_CREATE_STOCK_BASIC_SQL = """
+CREATE TABLE IF NOT EXISTS stock_basic (
+    symbol     TEXT PRIMARY KEY,
+    name       TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+"""
+
 
 def _bs_fetch_batch(tasks: list) -> list:
     """多进程 worker：独立 login，批量拉取 baostock 数据。"""
@@ -88,8 +114,13 @@ class DataEngine:
     def _init_db(self) -> None:
         Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
         with _connect(self.db_path) as conn:
+            # WAL 模式：选股写入（cron）与 Web 只读查询可能并发，WAL 下读不阻塞写
+            conn.execute("PRAGMA journal_mode=WAL")
             conn.execute(_CREATE_TABLE_SQL)
             conn.execute(_CREATE_INDEX_SQL)
+            conn.execute(_CREATE_SELECTION_TABLE_SQL)
+            conn.execute(_CREATE_SELECTION_INDEX_SQL)
+            conn.execute(_CREATE_STOCK_BASIC_SQL)
             conn.commit()
         logger.info(f"数据库初始化完成：{self.db_path}")
 
@@ -323,7 +354,16 @@ class DataEngine:
     # ── 股票列表 ──
 
     def get_all_symbols(self) -> list[str]:
-        """通过 baostock 获取全市场 A 股代码列表。"""
+        """
+        通过 baostock 获取全市场 A 股代码列表。
+
+        **副作用**：同一份 baostock 响应里就带着股票名称，本方法会顺手把
+        (代码, 名称) 写入 stock_basic 表，避免为了拿名称再发一轮网络请求。
+        名称写库失败只记 ERROR 日志，不影响本方法的返回值。
+
+        Returns:
+            上市状态的 A 股纯数字代码列表；查询失败时返回空列表。
+        """
         import baostock as bs
 
         lg = bs.login()
@@ -334,14 +374,28 @@ class DataEngine:
         try:
             rs = bs.query_stock_basic(code_name="", code="")
             symbols = []
+            basics: list[tuple[str, str]] = []
             while rs.next():
                 row = rs.get_row_data()
                 code = row[0]           # "sh.600000" or "sz.000001"
+                name = row[1]           # 股票名称
                 status = row[4]         # "1" = 上市
                 stock_type = row[5]     # "1" = 股票
                 if status == "1" and stock_type == "1":
-                    symbols.append(code.split(".")[1])  # 提取纯数字代码
+                    symbol = code.split(".")[1]  # 提取纯数字代码
+                    symbols.append(symbol)
+                    # 名称本来就在同一份响应里，顺手入库，零额外网络开销
+                    if name:
+                        basics.append((symbol, name))
             logger.info(f"获取股票列表完成，共 {len(symbols)} 只")
+
+            if basics:
+                try:
+                    self.upsert_stock_basic(basics)
+                except Exception as exc:
+                    # 名称只用于展示，写失败不能影响股票列表这个主返回值
+                    logger.error(f"股票名称写库失败：{exc}")
+
             return symbols
         except Exception as e:
             logger.error(f"获取股票列表失败: {e}")
@@ -355,3 +409,168 @@ class DataEngine:
                 "SELECT DISTINCT symbol FROM stock_daily"
             ).fetchall()
         return [row[0] for row in rows]
+
+    def upsert_stock_basic(self, rows: list[tuple[str, str]]) -> int:
+        """
+        批量写入股票代码与名称，已存在则更新名称。
+
+        Args:
+            rows: (symbol, name) 二元组列表。
+
+        Returns:
+            写入的记录条数。
+        """
+        if not rows:
+            return 0
+
+        from datetime import date
+
+        today_str = date.today().strftime("%Y-%m-%d")
+        payload = [(symbol, name, today_str) for symbol, name in rows]
+
+        with _connect(self.db_path) as conn:
+            conn.executemany(
+                "INSERT INTO stock_basic (symbol, name, updated_at) VALUES (?, ?, ?) "
+                "ON CONFLICT(symbol) DO UPDATE SET name = excluded.name, "
+                "updated_at = excluded.updated_at",
+                payload,
+            )
+            conn.commit()
+
+        return len(payload)
+
+    # ── 选股结果 ──
+
+    def save_selection(self, run_date: str, strategy: str, symbols: list[str]) -> int:
+        """
+        持久化一次选股结果。
+
+        同一 (run_date, strategy) 组合先删后插，保证重复运行 main.py 幂等。
+        采用先删再插而非 INSERT OR REPLACE，是因为重跑时结果集可能变小，
+        必须让上一次遗留的多余记录消失。
+
+        symbols 为空列表时只执行删除，写入 0 条——这样"当天该策略没选出票"
+        与"当天没跑过该策略"在数据上可以区分。
+
+        重复代码会被去重（保留首次出现的位置）并记 WARNING。策略本不该返回
+        重复项，但直接让 UNIQUE 约束抛错会导致该策略当天的结果整批丢失，
+        代价远大于收益；去重加告警既保住数据，又让异常在日志里可见。
+
+        Args:
+            run_date: 选股日期，格式 'YYYY-MM-DD'。
+            strategy: 策略类名，如 'TurtleTradeStrategy'。
+            symbols: run() 返回的股票代码列表，顺序即 rank。
+
+        Returns:
+            实际写入的记录条数（去重后）。
+        """
+        seen: set[str] = set()
+        unique_symbols: list[str] = []
+        for symbol in symbols:
+            if symbol not in seen:
+                seen.add(symbol)
+                unique_symbols.append(symbol)
+
+        if len(unique_symbols) != len(symbols):
+            logger.warning(
+                f"[{strategy}] 选股结果含重复代码，已去重："
+                f"{len(symbols)} -> {len(unique_symbols)}"
+            )
+
+        with _connect(self.db_path) as conn:
+            conn.execute(
+                "DELETE FROM selection_result WHERE run_date = ? AND strategy = ?",
+                (run_date, strategy),
+            )
+            if unique_symbols:
+                conn.executemany(
+                    "INSERT INTO selection_result (run_date, strategy, symbol, rank) "
+                    "VALUES (?, ?, ?, ?)",
+                    [
+                        (run_date, strategy, symbol, i)
+                        for i, symbol in enumerate(unique_symbols)
+                    ],
+                )
+            conn.commit()
+
+        return len(unique_symbols)
+
+    def get_selection_dates(self) -> list[str]:
+        """有选股结果的日期列表，按时间倒序（最新在前）。"""
+        with _connect(self.db_path) as conn:
+            rows = conn.execute(
+                "SELECT DISTINCT run_date FROM selection_result ORDER BY run_date DESC"
+            ).fetchall()
+        return [row[0] for row in rows]
+
+    def get_selection_strategies(self) -> list[str]:
+        """有选股结果的策略名列表，按字母序。"""
+        with _connect(self.db_path) as conn:
+            rows = conn.execute(
+                "SELECT DISTINCT strategy FROM selection_result ORDER BY strategy"
+            ).fetchall()
+        return [row[0] for row in rows]
+
+    def get_selections(
+        self,
+        run_date: str | None = None,
+        strategy: str | None = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> tuple[list[dict], int]:
+        """
+        分页查询选股结果，附带股票名称。
+
+        名称通过 LEFT JOIN stock_basic 获取，查不到为 None——名称只是展示信息，
+        不应成为查询失败的理由。结果一律按 rank 升序，还原策略的输出顺序。
+
+        Args:
+            run_date: 按日期过滤，None 表示不限。
+            strategy: 按策略名过滤，None 表示不限。
+            limit: 每页条数。
+            offset: 偏移量。
+
+        Returns:
+            (记录列表, 符合条件的总条数)。记录含 run_date / strategy /
+            symbol / name / rank 五个键。
+        """
+        # WHERE 子句由源码中的字面量片段拼成，过滤值一律走 ? 占位符，
+        # 不存在注入面。不要改写成 (? IS NULL OR col = ?)——那种写法会让
+        # SQLite 放弃 idx_selection_date_strategy 而全表扫描。
+        clauses: list[str] = []
+        params: list[str] = []
+        if run_date:
+            clauses.append("s.run_date = ?")
+            params.append(run_date)
+        if strategy:
+            clauses.append("s.strategy = ?")
+            params.append(strategy)
+        where_sql = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+
+        with _connect(self.db_path) as conn:
+            total = conn.execute(
+                f"SELECT COUNT(*) FROM selection_result s {where_sql}",
+                params,
+            ).fetchone()[0]
+
+            rows = conn.execute(
+                "SELECT s.run_date, s.strategy, s.symbol, b.name, s.rank "
+                "FROM selection_result s "
+                "LEFT JOIN stock_basic b ON b.symbol = s.symbol "
+                f"{where_sql} "
+                "ORDER BY s.run_date DESC, s.strategy, s.rank "
+                "LIMIT ? OFFSET ?",
+                (*params, limit, offset),
+            ).fetchall()
+
+        items = [
+            {
+                "run_date": row[0],
+                "strategy": row[1],
+                "symbol": row[2],
+                "name": row[3],
+                "rank": row[4],
+            }
+            for row in rows
+        ]
+        return items, total
