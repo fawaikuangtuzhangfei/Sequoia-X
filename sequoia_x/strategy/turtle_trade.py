@@ -23,6 +23,18 @@ class TurtleTradeStrategy(BaseStrategy):
     webhook_key: str = "turtle"
     _MIN_BARS: int = 21  # 至少需要 21 根 K 线（20日窗口 + 当日）
 
+    title = "海龟突破"
+    summary = "创 20 日新高，同时要求成交额过亿、当天是实体阳线。"
+    criteria = (
+        "今日收盘价 > 前 20 个交易日的最高价",
+        "今日成交额 > 1 亿元",
+        "今日收盘价 > 今日开盘价（实体阳线）",
+        "今日收盘价 > 昨日收盘价（排除高开低走的假阳线）",
+    )
+    data_source = "本地日线；排序时另向 baostock 查当日不复权价与换手率"
+    ordering = "按流通市值从大到小。流通市值 = 成交量 ÷ 换手率 × 不复权收盘价"
+    min_bars = "21 个交易日"
+
     def _get_market_caps(self, symbols: list[str]) -> dict[str, float]:
         """通过 baostock 查询候选股票的流通市值（不复权收盘价 × 流通股本）。
 

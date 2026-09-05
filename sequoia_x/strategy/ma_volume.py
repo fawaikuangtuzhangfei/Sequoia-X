@@ -21,6 +21,16 @@ class MaVolumeStrategy(BaseStrategy):
 
     webhook_key: str = "ma_volume"
 
+    title = "均线金叉放量"
+    summary = "5 日均线上穿 20 日均线的当天，并且明显放量。"
+    criteria = (
+        "昨日 MA5 < MA20，今日 MA5 > MA20（金叉发生在今天）",
+        "今日成交量 > 20 日均量 × 1.5",
+    )
+    data_source = "本地日线"
+    ordering = "未排序，按股票代码的遍历顺序"
+    min_bars = "20 个交易日"
+
     def run(self) -> list[str]:
         """
         遍历全市场，返回满足均线金叉+放量条件的股票代码列表。

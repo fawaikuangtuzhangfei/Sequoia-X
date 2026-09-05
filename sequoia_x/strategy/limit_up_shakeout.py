@@ -24,6 +24,18 @@ class LimitUpShakeoutStrategy(BaseStrategy):
     webhook_key: str = "shakeout"
     _MIN_BARS: int = 3  # 至少需要 3 根 K 线（前日、昨日、今日）
 
+    title = "涨停洗盘"
+    summary = "涨停次日放量收阴，但最低价没跌破前一日收盘——当作洗盘而非见顶。"
+    criteria = (
+        "昨日涨幅 ≥ 9.5%（视作涨停）",
+        "今日收盘价 < 今日开盘价（收阴）",
+        "今日成交量 > 昨日成交量 × 2",
+        "今日最低价 ≥ 昨日收盘价（支撑未破）",
+    )
+    data_source = "本地日线"
+    ordering = "未排序，按股票代码的遍历顺序"
+    min_bars = "3 个交易日"
+
     def run(self) -> list[str]:
         """
         遍历全市场，返回满足涨停洗盘条件的股票代码列表。

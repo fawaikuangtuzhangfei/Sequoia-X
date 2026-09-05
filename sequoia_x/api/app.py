@@ -15,7 +15,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from sequoia_x.api.routers import selections
+from sequoia_x.api.routers import selections, strategies
 from sequoia_x.core.config import get_settings
 from sequoia_x.core.logger import get_logger
 from sequoia_x.data.engine import DataEngine
@@ -56,6 +56,7 @@ def create_app(engine: DataEngine | None = None) -> FastAPI:
 
     app.add_exception_handler(sqlite3.Error, _handle_sqlite_error)
     app.include_router(selections.router, prefix="/api", tags=["selections"])
+    app.include_router(strategies.router, prefix="/api", tags=["strategies"])
 
     # 静态资源必须最后挂载：mount("/") 会兜住所有未匹配路径，
     # 放在 include_router 之前会把 /api/* 一起吃掉。

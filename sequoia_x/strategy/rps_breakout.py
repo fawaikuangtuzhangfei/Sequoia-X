@@ -13,6 +13,21 @@ class RpsBreakoutStrategy(BaseStrategy):
     rps_period: int = 120
     rps_threshold: int = 90
 
+    title = "RPS 强度突破"
+    summary = "120 日涨幅排进全市场前 10%，且股价仍贴着区间高点。"
+    criteria = (
+        "计算每只股票最近 120 个交易日的涨幅",
+        "横向排名，取 RPS ≥ 90（即涨幅前 10%）",
+        "今日收盘价 ≥ 该股 120 日最高价 × 0.9",
+    )
+    data_source = "本地日线（一次读入全表做横向排名）"
+    ordering = "未排序，按横向排名后的表顺序"
+    min_bars = "120 个交易日（滚动最高价 60 根起算）"
+    caveat = (
+        "RPS 是相对排名，「前 10%」只相对于本地已回填的股票池。"
+        "池子越小，排名越不可信——回填不完整时这个策略的结果参考价值有限。"
+    )
+
     def run(self) -> list[str]:
         try:
             with sqlite3.connect(self.engine.db_path) as conn:

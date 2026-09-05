@@ -23,6 +23,18 @@ class HighTightFlagStrategy(BaseStrategy):
     webhook_key: str = "flag"
     _MIN_BARS: int = 40  # 至少需要 40 根 K 线
 
+    title = "高旗形整理"
+    summary = "大涨之后极度缩量收敛，价格没跌下来，等变盘。"
+    criteria = (
+        "近 40 日最高价 ÷ 最低价 > 1.6（区间涨幅超 60%）",
+        "近 10 日最高价 ÷ 最低价 < 1.15（振幅收窄到 15% 以内）",
+        "近 10 日最低价 ≥ 近 40 日最高价 × 0.8（高位没破位）",
+        "今日成交量 < 前 20 日均量 × 0.6（缩量）",
+    )
+    data_source = "本地日线"
+    ordering = "未排序，按股票代码的遍历顺序"
+    min_bars = "40 个交易日"
+
     def run(self) -> list[str]:
         """
         遍历全市场，返回满足高旗形整理条件的股票代码列表。

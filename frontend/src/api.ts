@@ -15,6 +15,23 @@ export interface SelectionItem {
   xueqiu_code: string
 }
 
+/**
+ * 一个策略的说明。
+ *
+ * 内容来自策略类自身的属性（`sequoia_x/strategy/*.py`），随接口下发。
+ * 前端不再维护副本——判据里的阈值和 run() 里的阈值现在住在同一个文件里。
+ */
+export interface StrategyDoc {
+  class_name: string
+  title: string
+  summary: string
+  criteria: string[]
+  data_source: string
+  ordering: string
+  min_bars: string
+  caveat: string | null
+}
+
 export interface SelectionPage {
   date: string | null
   strategy: string | null
@@ -65,6 +82,11 @@ export function fetchDates(): Promise<string[]> {
 
 export function fetchStrategies(): Promise<string[]> {
   return getJson<string[]>('/api/strategies')
+}
+
+/** 全部已注册策略的说明，包含当天没跑出结果的那些。 */
+export function fetchStrategyDocs(): Promise<StrategyDoc[]> {
+  return getJson<StrategyDoc[]>('/api/strategies/docs')
 }
 
 export function fetchSelections(options: {

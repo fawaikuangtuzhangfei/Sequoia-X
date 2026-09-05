@@ -23,6 +23,17 @@ class PrivatePlacementStrategy(BaseStrategy):
     webhook_key: str = "private_placement"
     _LOOKBACK_DAYS: int = 7  # 回看天数，覆盖一周内的新公告
 
+    title = "定增公告"
+    summary = "最近 7 天发布定向增发公告的股票。这是公告监控，不是技术形态。"
+    criteria = (
+        "发行方式为「定向增发」（排除公开增发）",
+        "发行日期在最近 7 天内",
+    )
+    data_source = "akshare 东方财富「全部增发」，完全不使用本地行情"
+    ordering = "按发行日期从新到旧"
+    min_bars = "不需要历史行情"
+    caveat = "同一只股票可能有多条定增记录，已按代码去重，只保留最新的一条位置。"
+
     def run(self) -> list[str]:
         """拉取定增公告，返回近期有定向增发的股票代码列表。"""
         try:

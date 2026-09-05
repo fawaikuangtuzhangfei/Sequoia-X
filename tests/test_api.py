@@ -226,6 +226,31 @@ def test_health_and_metadata_endpoints() -> None:
         ]
 
 
+# Feature: sequoia-x-v2, Property 30: 说明端点如实反映注册表
+def test_strategy_docs_mirror_the_registry() -> None:
+    """属性 30：/api/strategies/docs 返回注册表里的全部策略，顺序一致。
+
+    它必须包含当天没跑出结果的策略——那些在结果页里根本不出现，
+    恰恰最需要解释。所以这个端点不能只返回"有数据的策略"。
+    """
+    from sequoia_x.strategy.registry import STRATEGIES
+
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        client, _ = make_client(tmp_dir)  # 空库：证明它不依赖任何选股数据
+        resp = client.get("/api/strategies/docs")
+
+    assert resp.status_code == 200
+    docs = resp.json()
+    assert [d["class_name"] for d in docs] == [c.__name__ for c in STRATEGIES]
+
+    for doc, cls in zip(docs, STRATEGIES, strict=True):
+        assert doc["title"] == cls.title
+        assert doc["summary"] == cls.summary
+        assert doc["criteria"] == list(cls.criteria)
+        assert doc["ordering"] == cls.ordering
+        assert doc["caveat"] == cls.caveat
+
+
 def test_database_error_returns_500_without_leaking_details() -> None:
     """数据库异常应转成 500，且不把 sqlite 原始报错回给客户端。
 

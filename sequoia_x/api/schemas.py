@@ -21,6 +21,19 @@ class SelectionItem(BaseModel):
     xueqiu_code: str = Field(description="雪球代码，如 'SH600519'，由服务端计算")
 
 
+class StrategyDoc(BaseModel):
+    """一个策略的说明。内容来自策略类自身的属性，不是这里另写的副本。"""
+
+    class_name: str = Field(description="策略类名，与 selection_result.strategy 一致")
+    title: str = Field(description="中文名，如 '海龟突破'")
+    summary: str = Field(description="一句话说清它在找什么")
+    criteria: list[str] = Field(description="逐条判据，顺序与 run() 的判断顺序一致")
+    data_source: str = Field(description="数据来源：本地行情还是外部接口")
+    ordering: str = Field(description="结果顺序的依据，也就是 rank 的含义")
+    min_bars: str = Field(description="需要多少历史数据才会参与计算")
+    caveat: str | None = Field(description="使用时需要留神的地方，没有则为 null")
+
+
 class SelectionPage(BaseModel):
     """一页选股结果。"""
 

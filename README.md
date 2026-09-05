@@ -35,7 +35,12 @@ python main.py --backfill     # 回填模式：全市场历史K线一次性灌�
 | **RpsBreakout** RPS 强度突破 | 120 日涨幅排进前 10%，且股价 ≥ 120 日最高价 ×0.9 | 未排序 |
 | **PrivatePlacement** 定增公告 | 最近 7 天发布定向增发公告（akshare，非技术形态） | 按发行日期从新到旧 |
 
-阈值即 `sequoia_x/strategy/` 源码里的阈值。Web 界面的「策略说明」页有逐条判据。
+上表是摘要。逐条判据、数据来源、最少需要多少历史数据，写在各策略类自身的
+`title` / `criteria` 等属性上（与 `run()` 的阈值同处一个文件），
+由 `GET /api/strategies/docs` 下发，Web 界面的「策略说明」页直接渲染。
+
+新增策略只需在 `sequoia_x/strategy/registry.py` 里加一行，
+`main.py` 会执行它，策略说明页也会自动出现。
 
 ---
 
@@ -138,6 +143,7 @@ cd frontend && npm run dev # 终端 2：前端，带热更新
 | GET | `/api/health` | 存活检查 |
 | GET | `/api/dates` | 有选股数据的日期，倒序 |
 | GET | `/api/strategies` | 有选股数据的策略名 |
+| GET | `/api/strategies/docs` | 全部已注册策略的说明（含当天没跑出结果的） |
 | GET | `/api/selections` | 查询选股结果，支持 `date` / `strategy` / `page` / `page_size` |
 
 交互式文档见 <http://127.0.0.1:8000/docs>。

@@ -23,6 +23,17 @@ class UptrendLimitDownStrategy(BaseStrategy):
     webhook_key: str = "limit_down"
     _MIN_BARS: int = 60  # 至少需要 60 根 K 线（60日均线）
 
+    title = "上升趋势跌停"
+    summary = "还在上升趋势里却放量跌停，当作错杀来观察。"
+    criteria = (
+        "昨日 MA20 > MA60（处于上升趋势）",
+        "今日跌幅 ≥ 9.5%（视作跌停）",
+        "今日成交量 > 20 日均量 × 2",
+    )
+    data_source = "本地日线"
+    ordering = "未排序，按股票代码的遍历顺序"
+    min_bars = "60 个交易日"
+
     def run(self) -> list[str]:
         """
         遍历全市场，返回满足上升趋势跌停条件的股票代码列表。

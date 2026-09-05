@@ -1,6 +1,13 @@
 import { useEffect, useMemo, useState } from 'react'
 
-import { describeError, fetchDates, fetchSelections, type SelectionPage } from './api'
+import {
+  describeError,
+  fetchDates,
+  fetchSelections,
+  fetchStrategyDocs,
+  type SelectionPage,
+  type StrategyDoc,
+} from './api'
 import { findResonance, groupByStrategy } from './format'
 import { DateRail } from './components/DateRail'
 import { DayHeader } from './components/DayHeader'
@@ -17,8 +24,23 @@ export default function App() {
   // 换不来任何东西，还会破坏"运行时依赖只有 react"的约束。
   const [guideOpen, setGuideOpen] = useState(false)
   const [page, setPage] = useState<SelectionPage | null>(null)
+  const [docs, setDocs] = useState<StrategyDoc[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+
+  // 策略说明。取失败只是没有说明文字，结果照常能看，
+  // 所以这里刻意不上报错误——dates 那条链路已经会报同一个后端故障。
+  useEffect(() => {
+    let cancelled = false
+    fetchStrategyDocs()
+      .then((list) => {
+        if (!cancelled) setDocs(list)
+      })
+      .catch(() => undefined)
+    return () => {
+      cancelled = true
+    }
+  }, [])
 
   // 首屏：取交易日列表，并选中最新的一天。
   // 这里的失败必须上报——后面按日期取结果的请求不会发出，
@@ -86,6 +108,10 @@ export default function App() {
     () => new Set(groups.map((g) => g.strategy)),
     [groups],
   )
+  const docMap = useMemo(
+    () => new Map(docs.map((d) => [d.class_name, d])),
+    [docs],
+  )
 
   const pickDate = (next: string) => {
     setDate(next)
@@ -105,7 +131,7 @@ export default function App() {
 
       <main className="main">
         {guideOpen ? (
-          <StrategyGuide activeToday={strategiesToday} />
+          <StrategyGuide docs={docs} activeToday={strategiesToday} />
         ) : error ? (
           <p className="state state-error">
             {error}
@@ -128,6 +154,7 @@ export default function App() {
 
             <StrategyTabs
               groups={groups}
+              docs={docMap}
               active={strategy}
               total={items.length}
               onPick={setStrategy}
@@ -136,7 +163,11 @@ export default function App() {
             {items.length === 0 ? (
               <p className="state">这天跑过，但没有股票通过筛选。</p>
             ) : (
-              <SelectionList groups={shownGroups} resonant={resonantSymbols} />
+              <SelectionList
+                groups={shownGroups}
+                docs={docMap}
+                resonant={resonantSymbols}
+              />
             )}
 
             {truncated && (

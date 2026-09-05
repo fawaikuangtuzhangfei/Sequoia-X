@@ -158,17 +158,6 @@ def test_name_is_joined_and_nullable(known: list[str], unknown: list[str]) -> No
 
 # ── main 流程的容错性 ──
 
-_STRATEGY_ATTRS = [
-    "MaVolumeStrategy",
-    "TurtleTradeStrategy",
-    "HighTightFlagStrategy",
-    "LimitUpShakeoutStrategy",
-    "UptrendLimitDownStrategy",
-    "RpsBreakoutStrategy",
-    "PrivatePlacementStrategy",
-]
-
-
 class _StubStrategy:
     """恒定返回一只股票的桩策略，避免测试触网或读真实数据库。"""
 
@@ -180,6 +169,13 @@ class _StubStrategy:
 
     def run(self) -> list[str]:
         return ["600519"]
+
+
+# 七个各自有不同类名的桩：main() 用 type(strategy).__name__ 作为落库的策略名，
+# 全用同一个类会让七次写入互相覆盖，测不出"每个策略都写了一次"。
+_STUBS = tuple(
+    type(f"Stub{i}Strategy", (_StubStrategy,), {}) for i in range(7)
+)
 
 
 # Feature: sequoia-x-v2, Property 19: 写库失败不影响飞书推送
@@ -207,14 +203,13 @@ def test_save_failure_does_not_break_notification(error_msg: str) -> None:
         stack.enter_context(patch.object(main_module, "get_settings", return_value=settings))
         stack.enter_context(patch.object(main_module, "DataEngine", return_value=engine))
         stack.enter_context(patch.object(main_module, "FeishuNotifier", return_value=notifier))
-        for attr in _STRATEGY_ATTRS:
-            stack.enter_context(patch.object(main_module, attr, _StubStrategy))
+        stack.enter_context(patch.object(main_module, "STRATEGIES", _STUBS))
         stack.enter_context(patch("sys.argv", ["main.py"]))
 
         main_module.main()  # 不应抛出，也不应 SystemExit
 
-    assert engine.save_selection.call_count == len(_STRATEGY_ATTRS)
-    assert notifier.send.call_count == len(_STRATEGY_ATTRS)
+    assert engine.save_selection.call_count == len(_STUBS)
+    assert notifier.send.call_count == len(_STUBS)
 
 
 def test_refresh_names_skips_strategies_and_notification() -> None:

@@ -1,16 +1,18 @@
 /** 策略筛选。选项只来自当天真实跑出结果的策略，选了不会得到空列表。 */
 
+import type { StrategyDoc } from '../api'
 import { shortStrategy, type StrategyGroup } from '../format'
-import { docFor } from '../strategies'
 
 interface StrategyTabsProps {
   groups: StrategyGroup[]
+  /** 类名 -> 说明，用于显示中文名。取失败时降级为英文短名 */
+  docs: Map<string, StrategyDoc>
   active: string | null
   total: number
   onPick: (strategy: string | null) => void
 }
 
-export function StrategyTabs({ groups, active, total, onPick }: StrategyTabsProps) {
+export function StrategyTabs({ groups, docs, active, total, onPick }: StrategyTabsProps) {
   if (groups.length < 2) {
     return null // 只有一个策略时，筛选器没有意义
   }
@@ -37,7 +39,7 @@ export function StrategyTabs({ groups, active, total, onPick }: StrategyTabsProp
           aria-selected={active === group.strategy}
           onClick={() => onPick(group.strategy)}
         >
-          {docFor(group.strategy)?.title ?? shortStrategy(group.strategy)}{' '}
+          {docs.get(group.strategy)?.title ?? shortStrategy(group.strategy)}{' '}
           <span className="n">{group.items.length}</span>
         </button>
       ))}

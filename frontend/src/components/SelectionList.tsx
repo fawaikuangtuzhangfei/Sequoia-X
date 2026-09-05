@@ -2,20 +2,22 @@
 
 import type { CSSProperties } from 'react'
 
+import type { StrategyDoc } from '../api'
 import { shortStrategy, type StrategyGroup } from '../format'
-import { docFor } from '../strategies'
 
 interface SelectionListProps {
   groups: StrategyGroup[]
+  /** 类名 -> 说明。接口取失败时为空 Map，此时降级为只显示类名 */
+  docs: Map<string, StrategyDoc>
   /** 共振股票代码，用于在行内打标记 */
   resonant: Set<string>
 }
 
-export function SelectionList({ groups, resonant }: SelectionListProps) {
+export function SelectionList({ groups, docs, resonant }: SelectionListProps) {
   return (
     <>
       {groups.map((group) => {
-        const doc = docFor(group.strategy)
+        const doc = docs.get(group.strategy)
 
         return (
           <section className="strat" key={group.strategy}>
