@@ -8,6 +8,7 @@ compute_returns 刻意不查表（它只吃三元组），所以"从哪张表取
 from collections.abc import Sequence
 
 from sequoia_x.backtest.analysis import (
+    concentration,
     filter_since,
     rank_strata,
     recency,
@@ -106,5 +107,6 @@ def print_analysis(
         # 分期对比刻意**不受 --since 限制**：它的全部价值就在于把最近和
         # 以往并排比较，砍掉历史等于砍掉对照组。
         recency(engine.get_returns(source)),
+        concentration(df),
         since=since,
     )

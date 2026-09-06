@@ -200,12 +200,53 @@ def _render_recency(rows: list[dict], console: Console) -> None:
     )
 
 
+def _render_concentration(rows: list[dict], console: Console) -> None:
+    """超额收益的集中度，判断边际能不能用少量仓位吃到。"""
+    horizon = rows[0]["horizon"]
+    table = Table(
+        title=f"⑥ 集中度：超额来自广泛分布还是少数几只（T+{horizon}）",
+        header_style="bold",
+        title_style="bold",
+        title_justify="left",
+    )
+    table.add_column("策略", no_wrap=True)
+    table.add_column("样本", justify="right")
+    table.add_column("亏损占比", justify="right")
+    table.add_column("中位超额", justify="right")
+    table.add_column("平均超额", justify="right")
+    table.add_column("前1%贡献", justify="right")
+    table.add_column("剔除前1%后", justify="right")
+
+    for row in rows:
+        share = row["top1pct_share"]
+        table.add_row(
+            _short_name(row["strategy"]),
+            str(row["n"]),
+            _rate(row["loss_rate"]),
+            _pct(row["median_excess"]),
+            _pct(row["mean_excess"]),
+            "—" if share is None else f"{share * 100:.0f}%",
+            _pct(row["mean_ex_top1pct"]),
+        )
+
+    console.print(table)
+    console.print(
+        "  平均超额相同的两个策略，可执行性可能天差地别，差别就在这张表上。\n"
+        "  [bold]想拿少量仓位跟单，看中位超额和「剔除前1%后」这两列[/bold]：\n"
+        "  中位数为负 = 多数持仓在亏，均值靠少数几只撑着；剔除前 1% 后大幅缩水\n"
+        "  = 必须几乎全买才吃得到，漏掉几只就由正转负。\n"
+        "  「前1%贡献」超过 100% 不是错：它表示剩下那 99% 合起来是净亏的，\n"
+        "  整个策略的正超额完全由最好的百分之一撑着。总超额接近 0 时该列显示为 —。\n"
+    )
+
+
 def render_analysis(
     rank_rows: list[dict],
     resonance_rows: list[dict],
     selectivity_rows: list[dict],
     within_rows: list[dict],
     recency_rows: list[dict] | None = None,
+    concentration_rows: list[dict] | None = None,
     since: str | None = None,
     console: Console | None = None,
 ) -> None:
@@ -224,9 +265,17 @@ def render_analysis(
     """
     console = console or Console(width=_CONSOLE_WIDTH)
     recency_rows = recency_rows or []
+    concentration_rows = concentration_rows or []
 
     if not any(
-        [rank_rows, resonance_rows, selectivity_rows, within_rows, recency_rows]
+        [
+            rank_rows,
+            resonance_rows,
+            selectivity_rows,
+            within_rows,
+            recency_rows,
+            concentration_rows,
+        ]
     ):
         hint = (
             f"（当前筛选 run_date >= {since}，放宽或去掉 --since 再试）\n"
@@ -296,6 +345,9 @@ def render_analysis(
             "  [bold]读之前先看幅度[/bold]：±0.1pp 以内基本是噪声，而一买一卖的成本就有 0.2%，\n"
             "  所以这一列要大到什么程度才有可操作性，心里要有个数。\n"
         )
+
+    if concentration_rows:
+        _render_concentration(concentration_rows, console)
 
     if recency_rows:
         _render_recency(recency_rows, console)

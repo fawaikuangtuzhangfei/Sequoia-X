@@ -185,6 +185,57 @@ def recency(df: pd.DataFrame, horizon: int = 1) -> list[dict]:
     return rows
 
 
+def concentration(df: pd.DataFrame, horizon: int = 1) -> list[dict]:
+    """
+    超额收益集中在多少只票上——判断"能不能用少量仓位执行"的关键。
+
+    一个平均超额为正、但一半以上持仓在亏、且超额的一半来自最好的 1% 的策略，
+    实际上不可执行：你得几乎全买才能抓到那几张彩票，漏掉几只就由正转负。
+    反过来，中位数为正、去掉最好的 1% 之后均值几乎不变的策略，
+    边际是广泛分布的，拿几个仓位也能吃到。
+
+    这两种情况在"平均超额"那一列上长得一模一样，这也是为什么要单独看这个。
+
+    Args:
+        df: DataEngine.get_returns() 的输出。
+        horizon: 在哪个持有期上看。
+
+    Returns:
+        每个策略一个字典，含亏损占比、中位超额、前 1% 的贡献占比、
+        以及剔除前 1% 之后的均值。按"剔除后均值"降序。
+    """
+    t = _tradable_only(df)
+    t = t[t["horizon"] == horizon]
+
+    rows: list[dict] = []
+    for strategy, group in t.groupby("strategy", sort=False):
+        if len(group) < _MIN_BUCKET_N:
+            continue
+        values = group["excess_ret"].sort_values(ascending=False).to_numpy()
+        n = len(values)
+        total = values.sum()
+        top_n = max(1, n // 100)
+        # 总超额接近 0 时占比会炸成天文数字，这种情况下这个比值没有意义
+        top_share = float(values[:top_n].sum() / total) if abs(total) > 1e-9 else None
+        rows.append(
+            {
+                "strategy": str(strategy),
+                "horizon": int(horizon),
+                "n": n,
+                "loss_rate": float((values < 0).mean()),
+                "median_excess": float(pd.Series(values).median()),
+                "mean_excess": float(values.mean()),
+                "top1pct_share": top_share,
+                "mean_ex_top1pct": float(values[top_n:].mean()) if n > top_n else None,
+            }
+        )
+
+    rows.sort(
+        key=lambda r: (r["mean_ex_top1pct"] is None, -(r["mean_ex_top1pct"] or 0.0))
+    )
+    return rows
+
+
 def _picks_per_day(df: pd.DataFrame) -> pd.DataFrame:
     """给每条样本标上"该策略当天一共选了多少只"。
 

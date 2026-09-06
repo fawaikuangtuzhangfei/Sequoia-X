@@ -11,6 +11,7 @@ from hypothesis import strategies as st
 
 from sequoia_x.backtest.analysis import (
     _MIN_BUCKET_N,
+    concentration,
     filter_since,
     rank_strata,
     recency,
@@ -190,3 +191,35 @@ def test_recency_reports_net_excess() -> None:
     for row in rows:
         assert abs(row["mean_net_excess"] - (row["mean_excess"] - ROUND_TRIP_COST)) < 1e-12
         assert row["quarter"].startswith("2024Q")
+
+
+# Feature: sequoia-x-v2, Property 68: 集中度分辨"广泛分布"与"少数几只撑着"
+def test_concentration_separates_broad_from_lottery_edges() -> None:
+    """属性 68：两个平均超额相同的策略，集中度指标必须能把它们分开。
+
+    这正是这张表存在的理由——平均超额那一列上它们长得一模一样，
+    但一个能用几个仓位跟单，另一个必须几乎全买才吃得到。
+    """
+    n = 200
+    # A：广泛分布，绝大多数样本小幅为正
+    broad = [0.01] * n
+    # B：一只暴涨撑起全部超额，其余全在小幅亏损
+    lottery = [-0.004] * (n - 1) + [0.01 * n + 0.004 * (n - 1)]
+
+    rows = {}
+    for name, values in (("A", broad), ("B", lottery)):
+        df = make_returns(n_days=1, n_symbols=1, strategies=(name,), horizons=(1,))
+        df = pd.concat([df] * n, ignore_index=True).iloc[:n]
+        df["excess_ret"] = values
+        rows[name] = concentration(df, horizon=1)[0]
+
+    # 均值几乎相同，集中度必须给出完全不同的画像
+    assert abs(rows["A"]["mean_excess"] - rows["B"]["mean_excess"]) < 1e-9
+    assert rows["A"]["loss_rate"] == 0.0
+    assert rows["B"]["loss_rate"] > 0.9
+    assert rows["A"]["median_excess"] > 0 > rows["B"]["median_excess"]
+    assert rows["A"]["top1pct_share"] < 0.1
+    assert rows["B"]["top1pct_share"] > 0.9
+    # 剔除最好的 1% 之后，广泛型几乎不变，彩票型转负
+    assert abs(rows["A"]["mean_ex_top1pct"] - rows["A"]["mean_excess"]) < 1e-3
+    assert rows["B"]["mean_ex_top1pct"] < 0
