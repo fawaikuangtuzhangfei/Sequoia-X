@@ -177,6 +177,11 @@ _LOGIN_STAGGER_SECONDS = 0.8
 _LOGIN_BACKOFF_BASE = 2.0
 _LOGIN_ATTEMPTS = 3
 
+# 单个批次内连续失败到这个数就停手。连着 20 只都查不到不是个股问题，
+# 是数据源不可用；剩下的直接记为失败交给串行补跑，别在这儿逐个等超时。
+# 没有这道闸，数据源真挂掉时串行补跑要空转几千次查询超时。
+_CONSECUTIVE_FAILURE_LIMIT = 20
+
 
 def _bs_login_with_retry(bs, worker_index: int, attempts: int = _LOGIN_ATTEMPTS) -> bool:
     """错开并重试 baostock 登录，返回是否成功。
@@ -220,26 +225,32 @@ def _bs_fetch_batch(arg: tuple[int, list]) -> tuple[list, dict[str, int]]:
     逐个超时，父进程照常记一条 INFO"无新数据（可能非交易日）"。cron 每天
     这样跑，策略会一直用过期数据选股，而没有任何告警。
 
+    回传的是**失败的任务本身**而不只是个数，因为父进程要拿它们去串行补跑
+    （见 `sync_today_bulk`）。只回传计数的话，父进程知道"丢了 250 只"却
+    不知道是哪 250 只，补不回来。
+
     Args:
         arg: `(worker 序号, 任务列表)`。序号只用于错开登录时机——`Pool.map`
             只能传一个参数，所以打包成元组。
 
     Returns:
-        (数据行, {"ok": 成功只数, "failed": 失败只数})。
+        (数据行, {"ok": 成功只数, "failed_tasks": 失败的任务列表})。
     """
     import baostock as bs
 
     worker_index, tasks = arg
-    stats = {"ok": 0, "failed": 0}
+    stats: dict = {"ok": 0, "failed_tasks": []}
 
     if not _bs_login_with_retry(bs, worker_index):
         # 重试过仍连不上，就别再逐只查了，整批直接记为失败
-        stats["failed"] = len(tasks)
+        stats["failed_tasks"] = list(tasks)
         return [], stats
 
     results = []
+    consecutive_failures = 0
     try:
-        for symbol, bs_code, start, end in tasks:
+        for i, task in enumerate(tasks):
+            symbol, bs_code, start, end = task
             rs = bs.query_history_k_data_plus(
                 bs_code,
                 "date,open,high,low,close,volume,amount",
@@ -249,11 +260,16 @@ def _bs_fetch_batch(arg: tuple[int, list]) -> tuple[list, dict[str, int]]:
                 adjustflag="1",  # 后复权
             )
             if rs.error_code != "0":
-                stats["failed"] += 1
+                stats["failed_tasks"].append(task)
+                consecutive_failures += 1
+                if consecutive_failures >= _CONSECUTIVE_FAILURE_LIMIT:
+                    stats["failed_tasks"].extend(tasks[i + 1:])
+                    break
                 continue
             while rs.next():
                 results.append([symbol] + rs.get_row_data())
             stats["ok"] += 1
+            consecutive_failures = 0
     finally:
         bs.logout()
 
@@ -352,11 +368,30 @@ class DataEngine:
 
         all_rows = []
         n_ok = 0
-        n_failed = 0
+        failed_tasks: list = []
         for batch, stats in batch_results:
             all_rows.extend(batch)
             n_ok += stats["ok"]
-            n_failed += stats["failed"]
+            failed_tasks.extend(stats["failed_tasks"])
+
+        # 分块是确定性的（`tasks[i::n_workers]`），所以同一只股票永远落在同一个
+        # worker 上。worker 挂掉时受害的永远是那固定的几百只——失败不是随机噪声，
+        # 而是**结构性盲区**：它们一天天持续落后，其余股票天天正常，汇总日志上
+        # 完全看不出来。实测 2026 年 5-9 月就是这样，mod 8 余数为 4 的那 250 只
+        # 一根新 K 线都没拿到，而余数为 5 的 103 只是新鲜的。
+        #
+        # 单进程补跑一遍：并行阶段失败的主因是并发握手被拒，串行恰好不触发它。
+        # 这把「永久盲区」降级成「这一轮慢一点」。Property 74 锁住这条。
+        if failed_tasks:
+            logger.warning(f"并行阶段有 {len(failed_tasks)} 只失败，改用单进程补跑...")
+            retry_rows, retry_stats = _bs_fetch_batch((0, failed_tasks))
+            all_rows.extend(retry_rows)
+            n_ok += retry_stats["ok"]
+            failed_tasks = retry_stats["failed_tasks"]
+            if retry_stats["ok"]:
+                logger.info(f"单进程补跑救回 {retry_stats['ok']} 只")
+
+        n_failed = len(failed_tasks)
 
         # 全军覆没和"今天休市"在数据上长得一模一样，但含义天差地别：
         # 前者意味着策略即将用过期数据选股，必须吵起来。
