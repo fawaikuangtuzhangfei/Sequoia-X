@@ -501,30 +501,10 @@ class DataEngine:
             return []
 
         try:
-            rs = bs.query_stock_basic(code_name="", code="")
-            symbols = []
-            basics: list[tuple[str, str]] = []
-            while rs.next():
-                row = rs.get_row_data()
-                code = row[0]           # "sh.600000" or "sz.000001"
-                name = row[1]           # 股票名称
-                status = row[4]         # "1" = 上市
-                stock_type = row[5]     # "1" = 股票
-                if status == "1" and stock_type == "1":
-                    symbol = code.split(".")[1]  # 提取纯数字代码
-                    symbols.append(symbol)
-                    # 名称本来就在同一份响应里，顺手入库，零额外网络开销
-                    if name:
-                        basics.append((symbol, name))
+            rows = self._query_stock_basic(status="1")
+            symbols = [symbol for symbol, _, _ in rows]
             logger.info(f"获取股票列表完成，共 {len(symbols)} 只")
-
-            if basics:
-                try:
-                    self.upsert_stock_basic(basics)
-                except Exception as exc:
-                    # 名称只用于展示，写失败不能影响股票列表这个主返回值
-                    logger.error(f"股票名称写库失败：{exc}")
-
+            self._store_names(rows)
             return symbols
         except Exception as e:
             logger.error(f"获取股票列表失败: {e}")
@@ -532,10 +512,114 @@ class DataEngine:
         finally:
             bs.logout()
 
+    def get_delisted_symbols(self, since: str | None = None) -> list[str]:
+        """
+        通过 baostock 获取**已退市**的 A 股代码列表。
+
+        存在的理由是幸存者偏差：`get_all_symbols` 只返回当前在市的股票，
+        于是"涨了很久然后崩掉退市"的票从来不在本地池里。动量类策略
+        （尤其 `RpsBreakout`，挑 120 日涨幅前 10%）在这个偏差下会被系统性高估。
+
+        baostock 对退市代码照常返回后复权日线，最后一根 bar 停在退市日，
+        所以补进来之后不需要额外的状态列——候选池按"当日有行情"筛选，
+        退市股会自然退出（`get_local_symbols` / `MarketCache.symbols_as_of`）。
+
+        **副作用**：与 `get_all_symbols` 一样顺手把名称写入 stock_basic。
+
+        Args:
+            since: 只取退市日不早于该日期（'YYYY-MM-DD'）的股票，
+                缺省为本地行情起始日。更早退市的票在任何回放区间内
+                都没有行情，拉下来也是空的。
+
+        Returns:
+            退市 A 股的纯数字代码列表；查询失败时返回空列表。
+        """
+        import baostock as bs
+
+        cutoff = since or self.start_date
+
+        lg = bs.login()
+        if lg.error_code != "0":
+            logger.error(f"baostock 登录失败: {lg.error_msg}")
+            return []
+
+        try:
+            rows = self._query_stock_basic(status="0")
+            # out_date 为空的退市记录无法判断是否落在区间内，一律放行，
+            # 拉不到行情时 backfill 会把它记成 skipped，代价只是一次空查询。
+            kept = [r for r in rows if not r[2] or r[2] >= cutoff]
+            logger.info(
+                f"获取退市股列表完成：共 {len(rows)} 只，"
+                f"退市日不早于 {cutoff} 的 {len(kept)} 只"
+            )
+            self._store_names(kept)
+            return [symbol for symbol, _, _ in kept]
+        except Exception as e:
+            logger.error(f"获取退市股列表失败: {e}")
+            return []
+        finally:
+            bs.logout()
+
+    @staticmethod
+    def _query_stock_basic(status: str) -> list[tuple[str, str, str]]:
+        """按上市状态拉取 baostock 的股票基础信息。
+
+        字段顺序是 code, code_name, ipoDate, outDate, **type, status**——
+        type 在前、status 在后。这两个位置极易写反，且写反后过滤条件
+        `type == "1" and status == "1"` 仍然给出正确结果，错误不会暴露。
+
+        Args:
+            status: '1' = 在市，'0' = 已退市。
+
+        Returns:
+            (纯数字代码, 名称, 退市日) 三元组列表；在市股票的退市日为空串。
+            仅含 type == '1'（股票），指数与其他品种被排除。
+        """
+        import baostock as bs
+
+        rs = bs.query_stock_basic(code_name="", code="")
+        if rs.error_code != "0":
+            raise RuntimeError(f"query_stock_basic 失败：{rs.error_msg}")
+
+        result: list[tuple[str, str, str]] = []
+        while rs.next():
+            code, name, _ipo, out_date, stock_type, stock_status = rs.get_row_data()[:6]
+            if stock_type != "1" or stock_status != status:
+                continue
+            result.append((code.split(".")[1], name, out_date))
+        return result
+
+    def _store_names(self, rows: list[tuple[str, str, str]]) -> None:
+        """把 (代码, 名称) 顺手写入 stock_basic。
+
+        名称本来就在股票列表的同一份响应里，零额外网络开销。
+        写失败只记 ERROR——名称仅用于展示，不能影响调用方的主返回值。
+        """
+        basics = [(symbol, name) for symbol, name, _ in rows if name]
+        if not basics:
+            return
+        try:
+            self.upsert_stock_basic(basics)
+        except Exception as exc:
+            logger.error(f"股票名称写库失败：{exc}")
+
     def get_local_symbols(self) -> list[str]:
+        """**在本地最新交易日有行情**的股票代码。
+
+        判据是"最新交易日在交易"，不是"库里有过行情"。策略用 `df.iloc[-1]`
+        表示"今天"，一只已退市或长期停牌的股票若仍留在候选池里，策略拿到的
+        是一根过期 K 线却当作今日行情来判形态，于是把早已不能买的票推给用户。
+
+        回填退市股之后这不再是边缘情形：库里必然长期存有大量最后一根 bar
+        停在过去某天的股票。回放侧的对应实现见 `MarketCache.symbols_as_of`。
+        """
         with _connect(self.db_path) as conn:
+            row = conn.execute("SELECT MAX(date) FROM stock_daily").fetchone()
+            latest = row[0] if row else None
+            if not latest:
+                return []
             rows = conn.execute(
-                "SELECT DISTINCT symbol FROM stock_daily"
+                "SELECT DISTINCT symbol FROM stock_daily WHERE date = ?", (latest,)
             ).fetchall()
         return [row[0] for row in rows]
 

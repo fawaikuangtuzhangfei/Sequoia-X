@@ -31,6 +31,11 @@ def main() -> None:
         help="回填模式：通过 baostock 拉取全市场历史 K 线（约12分钟）",
     )
     parser.add_argument(
+        "--backfill-delisted",
+        action="store_true",
+        help="回填已退市股票的历史 K 线，消除回测的幸存者偏差（约1分钟）",
+    )
+    parser.add_argument(
         "--refresh-names",
         action="store_true",
         help="仅刷新股票名称表（stock_basic），约几秒，供 Web 页面展示名称",
@@ -97,6 +102,23 @@ def main() -> None:
             all_symbols = engine.get_all_symbols()
             engine.backfill(all_symbols)
             logger.info("Sequoia-X V2 回填模式运行完成")
+            return
+
+        if args.backfill_delisted:
+            # ── 退市股回填：只为回测服务，日常选股用不到 ──
+            # 单独一个入口而不是并进 --backfill：退市股名单要另发一次
+            # baostock 查询，且这批数据补完就基本不变，没必要每次回填都拉。
+            #
+            # 补进来的股票不会污染日常推荐：候选池按"当日有行情"筛选
+            # （get_local_symbols），退市股的最后一根 bar 停在退市日，
+            # 自然就落选了。
+            logger.info("进入退市股回填模式...")
+            delisted = engine.get_delisted_symbols()
+            if not delisted:
+                logger.warning("未获取到退市股名单，回填无事可做")
+                return
+            engine.backfill(delisted)
+            logger.info(f"Sequoia-X V2 退市股回填完成，覆盖 {len(delisted)} 只")
             return
 
         if args.refresh_names:

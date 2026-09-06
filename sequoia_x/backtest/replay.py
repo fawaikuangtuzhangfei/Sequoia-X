@@ -95,15 +95,18 @@ class MarketCache:
         # 每只股票一份按日期升序的切片。
         self._by_symbol: dict[str, pd.DataFrame] = {}
         self._symbol_dates: dict[str, list[str]] = {}
-        self._symbol_first_date: dict[str, str] = {}
         for symbol, group in df.sort_values(["symbol", "date"], kind="stable").groupby(
             "symbol", sort=False
         ):
             g = group.reset_index(drop=True)
-            dates = g["date"].tolist()
             self._by_symbol[symbol] = g
-            self._symbol_dates[symbol] = dates
-            self._symbol_first_date[symbol] = dates[0]
+            self._symbol_dates[symbol] = g["date"].tolist()
+
+        # 每个交易日当天**实际有行情**的股票。见 symbols_as_of 的注释。
+        self._symbols_on_date: dict[str, list[str]] = {
+            date: group["symbol"].tolist()
+            for date, group in by_date.groupby("date", sort=False)
+        }
 
         logger.info(
             f"行情缓存就绪：{len(self._by_symbol)} 只股票 / {len(by_date)} 根 K 线"
@@ -130,12 +133,19 @@ class MarketCache:
         return self._by_date.iloc[:k]
 
     def symbols_as_of(self, as_of: str) -> list[str]:
-        """截至 as_of 已有行情的股票代码。"""
-        return [
-            symbol
-            for symbol, first in self._symbol_first_date.items()
-            if first <= as_of
-        ]
+        """**在 as_of 当天实际有行情**的股票代码。
+
+        判据是"当天在交易"，不是"在此之前上市过"。五个策略用 `df.iloc[-1]`
+        表示"今天"，一旦某只股票在 as_of 当天没有 bar，它们拿到的就是一根
+        过期的 K 线，却会当作今日行情去判形态、去选股。
+
+        用上市日判据（`first_date <= as_of`）时这个洞平时只在长期停牌股上
+        偶尔漏水；补入退市股之后就是系统性的——一只 2026-01 退市的股票会在
+        之后的每一个回放日都带着退市前的死 bar 进候选池。
+
+        `RpsBreakout` 不受影响，它自己筛了 `date == latest_date`。
+        """
+        return self._symbols_on_date.get(as_of, [])
 
 
 class AsOfEngine:
