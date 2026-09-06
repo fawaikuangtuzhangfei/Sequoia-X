@@ -84,7 +84,7 @@ def rank_strata(df: pd.DataFrame, horizons: tuple[int, ...] = (1, 20)) -> list[d
     return rows
 
 
-def resonance(df: pd.DataFrame, horizons: tuple[int, ...] = (1, 5, 20)) -> list[dict]:
+def resonance(df: pd.DataFrame, horizons: tuple[int, ...] = (1, 3, 5, 20)) -> list[dict]:
     """
     多策略共振：同一天被 k 个策略同时选中的股票，表现如何。
 

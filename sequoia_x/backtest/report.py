@@ -7,16 +7,19 @@
 from rich.console import Console
 from rich.table import Table
 
+from sequoia_x.backtest.metrics import ROUND_TRIP_COST
+
 # 报表固定按这个宽度渲染。让 rich 自适应终端宽度的话，
 # 窄终端下这张表会被截成一排 "…"，还不如换行。
-_CONSOLE_WIDTH: int = 110
+_CONSOLE_WIDTH: int = 132
 
 # 已知会让数字偏乐观的因素。每次打报表都原样输出。
 _CAVEATS: tuple[str, ...] = (
     "幸存者偏差：本地池只含当前仍在市的股票，退市股不在其中。"
     "基准取自同一批股票，两边偏差大部分相抵，但不会完全抵消。",
     "价格为后复权序列，含未来的复权因子。",
-    "不计手续费、印花税与滑点。按单边约 0.1% 折算，持有期越短影响越大。",
+    "「扣费后」两列按一买一卖合计 0.2% 折算（佣金+过户费+印花税+滑点的保守估计）。"
+    "不含冲击成本；单笔金额大时实际更差。",
     "本地池并非全市场，横截面排名类策略（RPS）的分位数只相对本地池成立。",
     "买入日个股按开盘价成交，基准是前收盘到收盘的全天涨幅，两者差一个隔夜跳空。"
     "该不对称让超额收益偏保守，不会虚高。",
@@ -50,6 +53,8 @@ def _build_table(title: str, rows: list[dict], sections: list[dict], prefix: str
     table.add_column("胜率", justify="right")
     table.add_column("平均超额", justify="right")
     table.add_column("超额胜率", justify="right")
+    table.add_column("扣费后超额", justify="right", style="cyan")
+    table.add_column("扣费后胜率", justify="right", style="cyan")
 
     def add(row: dict) -> None:
         table.add_row(
@@ -61,6 +66,8 @@ def _build_table(title: str, rows: list[dict], sections: list[dict], prefix: str
             _rate(row[f"{prefix}win_rate"]),
             _pct(row[f"{prefix}mean_excess"]),
             _rate(row[f"{prefix}excess_win_rate"]),
+            _pct(row[f"{prefix}mean_net_excess"]),
+            _rate(row[f"{prefix}net_excess_win_rate"]),
         )
 
     for row in rows:
@@ -124,6 +131,10 @@ def render_summary(
     console.print("\n[bold]口径[/bold]")
     console.print("  推荐日次日（T+1）开盘买入，持有 N 个交易日后收盘卖出，等权单票。")
     console.print("  基准为全市场等权日收益；超额 = 个股收益 − 同期基准复合收益。")
+    console.print(
+        f"  扣费后 = 每条样本的超额各减 {ROUND_TRIP_COST:.1%} 再统计"
+        "（逐条扣，不是在均值上减一刀，否则胜率会算错）。"
+    )
 
     console.print("\n[bold]以下因素会让上表数字偏乐观[/bold]")
     for i, caveat in enumerate(_CAVEATS, 1):

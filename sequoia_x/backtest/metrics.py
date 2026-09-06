@@ -10,9 +10,22 @@ from sequoia_x.core.logger import get_logger
 
 logger = get_logger(__name__)
 
+# 一买一卖的交易成本合计，用于给出扣费后的净超额。
+#
+# A 股单边大致是：佣金 万2.5~万3、过户费 万0.1、卖出印花税 千分之0.5，
+# 再加上买卖价差造成的滑点。取来回 0.2% 是个偏保守的整数近似。
+#
+# 为什么必须显式扣：短线策略的超额本来就在这个量级上。实测 T+1 有三个策略
+# 超额为正，扣费之后只剩一个——不扣费的表会把两个不赚钱的策略显示成赚钱的。
+ROUND_TRIP_COST: float = 0.002
 
-def _describe(group: pd.DataFrame) -> dict:
-    """算一组样本的六个指标。空组返回全 None，调用方负责过滤。"""
+
+def _describe(group: pd.DataFrame, cost: float = ROUND_TRIP_COST) -> dict:
+    """算一组样本的指标。空组返回全 None，调用方负责过滤。
+
+    扣费后的指标**逐条样本扣**再统计，不是在均值上减一刀：
+    净胜率必须是"有多少条样本扣完费还是正的"，在均值上做减法算不出这个数。
+    """
     if group.empty:
         return {
             "n": 0,
@@ -22,7 +35,10 @@ def _describe(group: pd.DataFrame) -> dict:
             "mean_excess": None,
             "median_excess": None,
             "excess_win_rate": None,
+            "mean_net_excess": None,
+            "net_excess_win_rate": None,
         }
+    net = group["excess_ret"] - cost
     return {
         "n": int(len(group)),
         "mean_ret": float(group["ret"].mean()),
@@ -31,6 +47,8 @@ def _describe(group: pd.DataFrame) -> dict:
         "mean_excess": float(group["excess_ret"].mean()),
         "median_excess": float(group["excess_ret"].median()),
         "excess_win_rate": float((group["excess_ret"] > 0).mean()),
+        "mean_net_excess": float(net.mean()),
+        "net_excess_win_rate": float((net > 0).mean()),
     }
 
 
