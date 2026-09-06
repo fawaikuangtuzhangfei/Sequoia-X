@@ -142,3 +142,127 @@ def test_partial_fetch_failure_warns() -> None:
     assert written == 0
     warnings = [r for r in records if r.levelno == logging.WARNING]
     assert warnings and "部分失败" in warnings[0].getMessage()
+
+
+def _seed_stale_symbols(engine: DataEngine, n: int) -> None:
+    """写 n 只很旧的股票，让 sync_today_bulk 有足够任务分给多个 worker。"""
+    with closing(sqlite3.connect(engine.db_path)) as conn, conn:
+        conn.executemany(
+            "INSERT INTO stock_daily (symbol, date, open, high, low, close, volume, turnover) "
+            "VALUES (?, '2024-01-02', 1, 1, 1, 1, 1, 1)",
+            [(f"{600000 + i:06d}",) for i in range(n)],
+        )
+
+
+# Feature: sequoia-x-v2, Property 70: 同步并发数取自配置，且 worker 拿得到自己的序号
+@given(configured=st.integers(min_value=1, max_value=16))
+@h_settings(max_examples=12, deadline=None)
+def test_sync_worker_count_comes_from_settings(configured: int) -> None:
+    """属性 70：Pool 的进程数等于 settings.sync_workers，不是写死的 8。
+
+    并发数写死过 8，而实测 8 个 worker 同时握手会被 baostock 全部拒绝。
+    不同机器的网络差异很大，这个值必须能调——写死就意味着下次还得改代码。
+
+    同时验证每个 chunk 都带上了 worker 序号：序号是错开登录的依据，
+    丢了它 _bs_login_with_retry 的错开逻辑就退化成"全部立即重试"。
+    """
+    n_symbols = 20
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        settings = Settings(
+            db_path=str(Path(tmp_dir) / "test.db"),
+            start_date="2024-01-01",
+            feishu_webhook_url="https://example.com/hook",
+            sync_workers=configured,
+        )
+        engine = DataEngine(settings)
+        _seed_stale_symbols(engine, n_symbols)
+
+        pool = MagicMock()
+        pool.__enter__.return_value.map.return_value = [([], {"ok": 1, "failed": 0})]
+        with patch("multiprocessing.Pool", return_value=pool) as mock_pool:
+            engine.sync_today_bulk()
+
+        expected = min(configured, n_symbols)
+        assert mock_pool.call_args.args[0] == expected, "Pool 进程数没有跟随配置"
+
+        chunks = pool.__enter__.return_value.map.call_args.args[1]
+        assert len(chunks) == expected
+        assert [c[0] for c in chunks] == list(range(expected)), "chunk 未携带 worker 序号"
+        # 任务必须完整分发，一只都不能漏
+        assert sum(len(c[1]) for c in chunks) == n_symbols
+
+
+# Feature: sequoia-x-v2, Property 71: 登录失败会重试，不是一锤子买卖
+def test_login_retries_before_giving_up() -> None:
+    """属性 71：前几次 login 失败后仍会重试，最终成功则返回 True。
+
+    此前一次 bs.login() 不通，这个 worker 负责的几百只股票就全记为失败。
+    而实测的失败形态恰恰是"N 个 worker 同时握手被集体拒绝"——
+    这种失败退避一下大概率就过了，直接放弃等于把可恢复的故障变成数据缺口。
+    """
+    bs = MagicMock()
+    bs.login.side_effect = [
+        MagicMock(error_code="10001"),
+        MagicMock(error_code="10001"),
+        MagicMock(error_code="0"),
+    ]
+    with patch("time.sleep") as slept:  # 别在测试里真睡
+        ok = engine_module._bs_login_with_retry(bs, worker_index=2, attempts=3)
+
+    assert ok is True
+    assert bs.login.call_count == 3
+    assert slept.called
+
+
+def test_first_login_is_staggered_by_worker_index() -> None:
+    """首次连接必须按 worker 序号错开，哪怕这次登录一把就成功。
+
+    实测的失败形态是"N 个 worker 同时握手被集体拒绝"，错开首连是最省事的
+    规避方式。必须在**登录成功**的路径上验证：如果只在失败路径上断言
+    "sleep 过"，退避那次 sleep 会替错开背书，去掉错开也测不出来——
+    这条测试就是补上那个漏洞的（变异测试发现的）。
+    """
+    bs = MagicMock()
+    bs.login.return_value = MagicMock(error_code="0")
+    with patch("time.sleep") as slept:
+        assert engine_module._bs_login_with_retry(bs, worker_index=3) is True
+
+    # 一次成功 = 没有退避，所以唯一的 sleep 只可能是错开
+    assert slept.call_count == 1
+    assert slept.call_args.args[0] == 3 * engine_module._LOGIN_STAGGER_SECONDS
+
+
+def test_login_gives_up_after_all_attempts() -> None:
+    """一直失败时返回 False，让调用方把整批记为 failed（而非静默成功）。"""
+    bs = MagicMock()
+    bs.login.return_value = MagicMock(error_code="10001")
+    with patch("time.sleep"):
+        ok = engine_module._bs_login_with_retry(bs, worker_index=0, attempts=3)
+
+    assert ok is False
+    assert bs.login.call_count == 3
+
+
+def test_sync_workers_rejects_zero() -> None:
+    """0 会让 range(n_workers) 产出零个 chunk —— 一只都不拉却什么都不报。
+
+    这种"配置成 0 就静默不干活"是最难查的一类故障，用字段约束挡在门口。
+    """
+    import pytest
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        Settings(
+            db_path="x.db",
+            feishu_webhook_url="https://example.com/hook",
+            sync_workers=0,
+        )
+
+
+def test_worker_zero_does_not_stagger() -> None:
+    """0 号 worker 不该白等：错开是相对的，第一个直接开跑。"""
+    bs = MagicMock()
+    bs.login.return_value = MagicMock(error_code="0")
+    with patch("time.sleep") as slept:
+        assert engine_module._bs_login_with_retry(bs, worker_index=0) is True
+    slept.assert_not_called()

@@ -81,7 +81,46 @@ CREATE TABLE IF NOT EXISTS stock_basic (
 """
 
 
-def _bs_fetch_batch(tasks: list) -> tuple[list, dict[str, int]]:
+# worker 之间错开登录的间隔（秒）。实测所有 worker 同一瞬间握手时
+# baostock 会把它们全部拒掉，错开首次连接是最省事的规避方式。
+_LOGIN_STAGGER_SECONDS = 0.8
+# 登录失败后的退避基数（秒），按 2 的幂增长
+_LOGIN_BACKOFF_BASE = 2.0
+_LOGIN_ATTEMPTS = 3
+
+
+def _bs_login_with_retry(bs, worker_index: int, attempts: int = _LOGIN_ATTEMPTS) -> bool:
+    """错开并重试 baostock 登录，返回是否成功。
+
+    登录失败过去是一锤子买卖：一次 `bs.login()` 不通，这个 worker 负责的
+    几百只股票就全部记为失败。实测的失败形态恰恰是"N 个 worker 同时握手
+    被集体拒绝"——这种失败重试一下大概率就过了，不该直接放弃。
+
+    Args:
+        bs: 已导入的 baostock 模块（由调用方传入，便于测试替换）。
+        worker_index: worker 序号，用于错开首次连接和退避时长。
+        attempts: 总尝试次数。
+
+    Returns:
+        True 表示登录成功。
+    """
+    import time
+
+    # 首次连接按序号错开，避免 N 个进程撞在同一毫秒
+    if worker_index:
+        time.sleep(worker_index * _LOGIN_STAGGER_SECONDS)
+
+    for attempt in range(attempts):
+        lg = bs.login()
+        if lg.error_code == "0":
+            return True
+        if attempt < attempts - 1:
+            # 退避时长也掺进 worker_index，避免重试时再次集体撞车
+            time.sleep(_LOGIN_BACKOFF_BASE * (2**attempt) + worker_index * _LOGIN_STAGGER_SECONDS)
+    return False
+
+
+def _bs_fetch_batch(arg: tuple[int, list]) -> tuple[list, dict[str, int]]:
     """多进程 worker：独立 login，批量拉取 baostock 数据。
 
     **必须把失败计数回传给父进程。** 这些 worker 跑在独立进程里，它们的日志
@@ -92,16 +131,20 @@ def _bs_fetch_batch(tasks: list) -> tuple[list, dict[str, int]]:
     逐个超时，父进程照常记一条 INFO"无新数据（可能非交易日）"。cron 每天
     这样跑，策略会一直用过期数据选股，而没有任何告警。
 
+    Args:
+        arg: `(worker 序号, 任务列表)`。序号只用于错开登录时机——`Pool.map`
+            只能传一个参数，所以打包成元组。
+
     Returns:
         (数据行, {"ok": 成功只数, "failed": 失败只数})。
     """
     import baostock as bs
 
+    worker_index, tasks = arg
     stats = {"ok": 0, "failed": 0}
 
-    lg = bs.login()
-    if lg.error_code != "0":
-        # 连不上就别再逐只重试了，整批直接记为失败
+    if not _bs_login_with_retry(bs, worker_index):
+        # 重试过仍连不上，就别再逐只查了，整批直接记为失败
         stats["failed"] = len(tasks)
         return [], stats
 
@@ -134,6 +177,7 @@ class DataEngine:
     def __init__(self, settings: Settings) -> None:
         self.db_path: str = settings.db_path
         self.start_date: str = settings.start_date
+        self.sync_workers: int = settings.sync_workers
         self._init_db()
 
     def _init_db(self) -> None:
@@ -203,10 +247,11 @@ class DataEngine:
             logger.info("所有股票已是最新，无需更新")
             return 0
 
-        logger.info(f"需要更新 {len(tasks)} 只股票，启动多进程并行拉取...")
+        n_workers = min(self.sync_workers, len(tasks))
+        logger.info(f"需要更新 {len(tasks)} 只股票，启动 {n_workers} 个进程并行拉取...")
 
-        n_workers = min(8, len(tasks))
-        chunks = [tasks[i::n_workers] for i in range(n_workers)]
+        # 带上 worker 序号，worker 用它错开登录时机（见 _bs_login_with_retry）
+        chunks = [(i, tasks[i::n_workers]) for i in range(n_workers)]
 
         with Pool(n_workers) as pool:
             batch_results = pool.map(_bs_fetch_batch, chunks)
