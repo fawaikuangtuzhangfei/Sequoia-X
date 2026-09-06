@@ -144,6 +144,69 @@ def test_partial_fetch_failure_warns() -> None:
     assert warnings and "部分失败" in warnings[0].getMessage()
 
 
+def _seed_bars(engine: DataEngine, symbol: str, dates: list[str]) -> None:
+    """给某只股票写入指定日期的 K 线。"""
+    with closing(sqlite3.connect(engine.db_path)) as conn, conn:
+        conn.executemany(
+            "INSERT INTO stock_daily (symbol, date, open, high, low, close, volume, turnover) "
+            "VALUES (?, ?, 1, 1, 1, 1, 100, 100)",
+            [(symbol, d) for d in dates],
+        )
+
+
+def _dates_of(engine: DataEngine, symbol: str) -> list[str]:
+    with closing(sqlite3.connect(engine.db_path)) as conn:
+        return [r[0] for r in conn.execute(
+            "SELECT date FROM stock_daily WHERE symbol = ? ORDER BY date", (symbol,))]
+
+
+# Feature: sequoia-x-v2, Property 73: 同步只覆盖自己抓到的 (symbol, date)，不碰别的股票
+def test_sync_does_not_delete_other_symbols_history() -> None:
+    """属性 73：一只落后股补数据时，不得删掉其它股票同期的历史。
+
+    写入路径曾经是「DELETE 掉 df 里出现过的每个日期，再整体 append」。
+    日常同步时所有股票都只抓当天，看不出问题；可一旦各股票的 last_date
+    参差不齐——任何一次部分失败之后必然如此——落后股会带回横跨数月的日期，
+    于是那几个月被对**所有**股票删除，却只写回落后股那一份。
+
+    这不是假想：生产库里全市场 2000 只的 2026-05-12..09-02 就是这样被挖空的，
+    持续四个月，日志上始终显示"运行完成"。它是个失败放大器——
+    一次失败造成参差，下一次同步就把好数据删掉。
+    """
+    fresh_dates = [f"2026-01-{d:02d}" for d in range(1, 11)]   # 健康股：10 根
+    stale_dates = [f"2026-01-{d:02d}" for d in range(1, 4)]    # 落后股：只到 01-03
+
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        engine, _ = make_engine_in(tmp_dir)
+        _seed_bars(engine, "AAA", fresh_dates)
+        _seed_bars(engine, "BBB", stale_dates)
+
+        # 本轮只有落后股 BBB 抓回了 01-04..01-10
+        fetched = [["BBB", f"2026-01-{d:02d}", "1", "1", "1", "1", "100", "100"]
+                   for d in range(4, 11)]
+        _run_sync_with(engine, [(fetched, {"ok": 2, "failed": 0})])
+
+        assert _dates_of(engine, "AAA") == fresh_dates, "健康股的历史被删掉了"
+        assert _dates_of(engine, "BBB") == fresh_dates, "落后股没有补齐"
+
+
+def test_sync_refreshes_a_bar_it_refetches() -> None:
+    """重抓同一根 K 线时用新值覆盖旧值，且不产生重复行。"""
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        engine, _ = make_engine_in(tmp_dir)
+        _seed_bars(engine, "AAA", ["2026-01-01"])
+
+        fetched = [["AAA", "2026-01-01", "9", "9", "9", "9", "500", "500"]]
+        _run_sync_with(engine, [(fetched, {"ok": 1, "failed": 0})])
+
+        with closing(sqlite3.connect(engine.db_path)) as conn:
+            rows = conn.execute(
+                "SELECT close, volume FROM stock_daily WHERE symbol='AAA' AND date='2026-01-01'"
+            ).fetchall()
+    assert len(rows) == 1, "同一 (symbol, date) 出现了重复行"
+    assert rows[0] == (9.0, 500.0), "重抓的数据没有覆盖旧值"
+
+
 def _seed_stale_symbols(engine: DataEngine, n: int) -> None:
     """写 n 只很旧的股票，让 sync_today_bulk 有足够任务分给多个 worker。"""
     with closing(sqlite3.connect(engine.db_path)) as conn, conn:

@@ -80,6 +80,10 @@ CREATE TABLE IF NOT EXISTS stock_basic (
 );
 """
 
+# stock_daily 的业务列，顺序与 INSERT 语句一一对应
+_OHLCV_COLUMNS = ["symbol", "date", "open", "high", "low", "close", "volume", "turnover"]
+_OHLCV_NUMERIC_COLUMNS = ["open", "high", "low", "close", "volume", "turnover"]
+
 
 # worker 之间错开登录的间隔（秒）。实测所有 worker 同一瞬间握手时
 # baostock 会把它们全部拒掉，错开首次连接是最省事的规避方式。
@@ -280,17 +284,32 @@ class DataEngine:
             logger.info(f"无新数据，可能是非交易日（{n_ok} 只查询成功但都没有新 K 线）")
             return 0
 
-        df = pd.DataFrame(all_rows, columns=["symbol", "date", "open", "high", "low", "close", "volume", "turnover"])
-        for col in ["open", "high", "low", "close", "volume", "turnover"]:
+        df = pd.DataFrame(all_rows, columns=_OHLCV_COLUMNS)
+        for col in _OHLCV_NUMERIC_COLUMNS:
             df[col] = pd.to_numeric(df[col], errors="coerce")
         df = df.dropna(subset=["close"])
         df = df[df["volume"] > 0]
 
         count = len(df)
+        # 按 (symbol, date) 精确覆盖，绝不按日期整片删。
+        #
+        # 这里曾经是「先 DELETE 掉 df 里出现过的每一个日期，再整体 append」。
+        # 那等于删掉那一天**所有股票**的数据，却只写回本次抓到的那一批。
+        # 日常同步时所有股票都只抓当天，unique() 只有一个日期，删了又全写回，
+        # 看不出问题；可只要各股票的 last_date 参差不齐——任何一次部分失败之后
+        # 必然如此——抓回来的日期就横跨数月，删除范围远大于写回范围，
+        # 健康股那几个月的历史被整段抹掉，而且不会补回来。
+        #
+        # 这是个失败放大器：一次同步失败造成参差，下一次同步就把好数据删掉，
+        # 参差进一步扩大。实测后果是全市场 2000 只在 2026-05-12..09-02 被挖空，
+        # 持续四个月，日志上却始终是"运行完成"。Property 73 锁住这条。
         with _connect(self.db_path) as conn:
-            for d in df["date"].unique().tolist():
-                conn.execute("DELETE FROM stock_daily WHERE date = ?", (d,))
-            df.to_sql("stock_daily", conn, if_exists="append", index=False, method="multi", chunksize=500)
+            conn.executemany(
+                "INSERT OR REPLACE INTO stock_daily "
+                "(symbol, date, open, high, low, close, volume, turnover) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                df[_OHLCV_COLUMNS].itertuples(index=False, name=None),
+            )
             conn.commit()
 
         logger.info(f"sync_today_bulk: 写入 {count} 条数据")
