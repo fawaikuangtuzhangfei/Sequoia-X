@@ -8,6 +8,7 @@ from rich.console import Console
 from rich.table import Table
 
 from sequoia_x.backtest.metrics import ROUND_TRIP_COST
+from sequoia_x.backtest.returns import MIN_EXECUTABLE_HORIZON
 
 # 报表固定按这个宽度渲染。让 rich 自适应终端宽度的话，
 # 窄终端下这张表会被截成一排 "…"，还不如换行。
@@ -15,6 +16,9 @@ _CONSOLE_WIDTH: int = 132
 
 # 已知会让数字偏乐观的因素。每次打报表都原样输出。
 _CAVEATS: tuple[str, ...] = (
+    "T+1 交收：当日买入当日不可卖出，所以标 * 的 T+1 那一行"
+    "（次日开盘买、当日收盘卖）在 A 股股票上**执行不了**，只作研究参考。"
+    "最短的可执行持有期是 T+2。",
     "幸存者偏差：本地池只含当前仍在市的股票，退市股不在其中。"
     "基准取自同一批股票，两边偏差大部分相抵，但不会完全抵消。",
     "价格为后复权序列，含未来的复权因子。",
@@ -30,6 +34,11 @@ _CAVEATS: tuple[str, ...] = (
 def _short_name(strategy: str) -> str:
     """去掉类名末尾的 Strategy，让策略列窄一半。"""
     return strategy[: -len("Strategy")] if strategy.endswith("Strategy") else strategy
+
+
+def _horizon_label(horizon: int) -> str:
+    """持有期标签。不可执行的持有期打星号，让它在表里就显眼。"""
+    return f"{horizon}*" if horizon < MIN_EXECUTABLE_HORIZON else str(horizon)
 
 
 def _pct(value: float | None) -> str:
@@ -59,7 +68,7 @@ def _build_table(title: str, rows: list[dict], sections: list[dict], prefix: str
     def add(row: dict) -> None:
         table.add_row(
             _short_name(row["strategy"]),
-            str(row["horizon"]),
+            _horizon_label(row["horizon"]),
             str(row[f"{prefix}n"]),
             _pct(row[f"{prefix}mean_ret"]),
             _pct(row[f"{prefix}median_ret"]),
@@ -175,8 +184,9 @@ def _render_recency(rows: list[dict], console: Console) -> None:
     for row in rows:
         by_strategy.setdefault(row["strategy"], {})[row["quarter"]] = row
 
+    horizon = rows[0]["horizon"]
     table = Table(
-        title="⑤ 分期对比：各季度的扣费后超额（T+1）",
+        title=f"⑤ 分期对比：各季度的扣费后超额（T+{horizon}）",
         header_style="bold",
         title_style="bold",
         title_justify="left",

@@ -1,8 +1,12 @@
 """分层分析：在已算好的收益明细上切几刀，看有没有比"全买"更好的子集。
 
 主报表回答"策略整体赚不赚钱"，这里回答"有没有哪一部分是赚钱的"。
-三个切法各有各的用途，其中第一个是**对照组**，不是结论——
-读输出前先看下面每个函数的 docstring。
+每个切法各有用途，其中 rank_strata 是**对照组**，不是结论；
+concentration 才是判断某个边际能不能实际用上的那一个。
+
+**这些 docstring 只描述方法，不写结论。** 结论会随样本变——
+共振的方向就在两轮回测之间翻转过——写进代码里迟早变成谎话。
+实际结论在 .trellis/tasks/09-06-selection-backtest/findings.md。
 
 所有函数都是纯函数，输入是 DataEngine.get_returns() 的 DataFrame，
 不碰数据库。这样加一个新切法不需要动数据层。
@@ -11,6 +15,7 @@
 import pandas as pd
 
 from sequoia_x.backtest.metrics import ROUND_TRIP_COST
+from sequoia_x.backtest.returns import MIN_EXECUTABLE_HORIZON
 from sequoia_x.core.logger import get_logger
 
 logger = get_logger(__name__)
@@ -76,8 +81,8 @@ def rank_strata(df: pd.DataFrame, horizons: tuple[int, ...] = (1, 20)) -> list[d
     正因如此它是个好用的健全性检查：**这里不该出现跨持有期一致的效应**。
     如果出现了，先怀疑收益计算漏了未来数据，而不是庆祝发现了信号。
 
-    实测确实无信号：T+1 看似前段略优，但 T+20 符号反转，说明测到的是板块
-    （rank ≈ 代码 ≈ 000/300/600/688）而非选股质量。
+    rank ≈ 代码顺序 ≈ 板块（000/300/600/688），所以各持有期方向不一致时，
+    通常测到的只是板块差异。
 
     Args:
         df: DataEngine.get_returns() 的输出，需含 rank 列。
@@ -105,8 +110,8 @@ def resonance(df: pd.DataFrame, horizons: tuple[int, ...] = (1, 3, 5, 20)) -> li
     会以 3 条收益完全相同的记录进入均值，等于给它三倍权重——
     那样算出来的"共振组表现"里混着重复计数造成的偏差。
 
-    实测结论与直觉相反：**共振越强表现越差，且三个持有期上单调一致**。
-    这直接影响前端的「多策略共振」功能。
+    这个方向不稳定：换一个股票池和时段，正负会翻过来。所以看的重点是
+    "方向在各持有期上是否一致"，而不是某一格的数字大小。
 
     Args:
         df: DataEngine.get_returns() 的输出。
@@ -136,7 +141,7 @@ def resonance(df: pd.DataFrame, horizons: tuple[int, ...] = (1, 3, 5, 20)) -> li
     return rows
 
 
-def recency(df: pd.DataFrame, horizon: int = 1) -> list[dict]:
+def recency(df: pd.DataFrame, horizon: int = MIN_EXECUTABLE_HORIZON) -> list[dict]:
     """
     按季度拆开看每个策略的净超额，回答"这个策略最近还灵吗"。
 
@@ -150,7 +155,8 @@ def recency(df: pd.DataFrame, horizon: int = 1) -> list[dict]:
 
     Args:
         df: DataEngine.get_returns() 的输出。
-        horizon: 在哪个持有期上看，默认 T+1。
+        horizon: 在哪个持有期上看。默认取最短的**可执行**持有期——
+            T+1 在 A 股是日内回转，做不了，拿它判断"还灵不灵"没有意义。
 
     Returns:
         每 (策略, 季度) 一个字典，按策略、季度升序。样本不足的季度会被略过。
@@ -185,7 +191,7 @@ def recency(df: pd.DataFrame, horizon: int = 1) -> list[dict]:
     return rows
 
 
-def concentration(df: pd.DataFrame, horizon: int = 1) -> list[dict]:
+def concentration(df: pd.DataFrame, horizon: int = MIN_EXECUTABLE_HORIZON) -> list[dict]:
     """
     超额收益集中在多少只票上——判断"能不能用少量仓位执行"的关键。
 
@@ -198,7 +204,7 @@ def concentration(df: pd.DataFrame, horizon: int = 1) -> list[dict]:
 
     Args:
         df: DataEngine.get_returns() 的输出。
-        horizon: 在哪个持有期上看。
+        horizon: 在哪个持有期上看。默认取最短的可执行持有期，理由同 recency。
 
     Returns:
         每个策略一个字典，含亏损占比、中位超额、前 1% 的贡献占比、
@@ -285,9 +291,9 @@ def selectivity_within_strategy(df: pd.DataFrame, horizon: int = 1) -> list[dict
     选得少的那档可能只是由那些本来就精挑细选的策略构成；在策略内部比较，
     这个混淆就消失了。
 
-    实测四个大样本策略全部为正（少的日子更好），为负的两个样本量只有几百。
-    解读是信号数量像市场情绪的代理：几百只同时触发突破的日子是亢奋日，
-    买在了顶上。
+    若差普遍为正，一个合理的解读是信号数量充当了市场情绪的代理：
+    几百只同时触发突破的日子是亢奋日，买在了顶上。读之前先看幅度——
+    ±0.1pp 以内是噪声，而一买一卖的成本就有 0.2%。
 
     Args:
         df: DataEngine.get_returns() 的输出。
