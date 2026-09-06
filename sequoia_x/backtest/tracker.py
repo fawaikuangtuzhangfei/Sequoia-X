@@ -8,7 +8,9 @@ compute_returns 刻意不查表（它只吃三元组），所以"从哪张表取
 from collections.abc import Sequence
 
 from sequoia_x.backtest.analysis import (
+    filter_since,
     rank_strata,
+    recency,
     resonance,
     selectivity,
     selectivity_within_strategy,
@@ -63,20 +65,25 @@ def track_returns(
     return stats
 
 
-def print_report(engine: DataEngine, source: str = "live") -> None:
+def print_report(
+    engine: DataEngine, source: str = "live", since: str | None = None
+) -> None:
     """
     读出已落库的收益明细并打印汇总报表。
 
     Args:
         engine: 数据引擎。
         source: 'live' 或 'replay'。
+        since: 只统计该日期及之后的推荐，'YYYY-MM-DD'。None 表示全部。
     """
-    df = engine.get_returns(source)
+    df = filter_since(engine.get_returns(source), since)
     coverage = engine.get_return_coverage(source)
     render_summary(summarize(df), overall(df), coverage, source)
 
 
-def print_analysis(engine: DataEngine, source: str = "replay") -> None:
+def print_analysis(
+    engine: DataEngine, source: str = "replay", since: str | None = None
+) -> None:
     """
     读出收益明细并打印分层分析报表。
 
@@ -87,11 +94,17 @@ def print_analysis(engine: DataEngine, source: str = "replay") -> None:
     Args:
         engine: 数据引擎。
         source: 'live' 或 'replay'。默认 replay——实盘样本量长期不足以分层。
+        since: 只统计该日期及之后的推荐。想看"最近三个月"用这个，
+            不必为一个时间窗重跑回放。
     """
-    df = engine.get_returns(source)
+    df = filter_since(engine.get_returns(source), since)
     render_analysis(
         rank_strata(df),
         resonance(df),
         selectivity(df),
         selectivity_within_strategy(df),
+        # 分期对比刻意**不受 --since 限制**：它的全部价值就在于把最近和
+        # 以往并排比较，砍掉历史等于砍掉对照组。
+        recency(engine.get_returns(source)),
+        since=since,
     )

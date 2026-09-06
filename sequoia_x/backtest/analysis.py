@@ -10,9 +10,22 @@
 
 import pandas as pd
 
+from sequoia_x.backtest.metrics import ROUND_TRIP_COST
 from sequoia_x.core.logger import get_logger
 
 logger = get_logger(__name__)
+
+
+def filter_since(df: pd.DataFrame, since: str | None) -> pd.DataFrame:
+    """只保留 run_date >= since 的样本。since 为 None 时原样返回。
+
+    date 是 'YYYY-MM-DD' 字符串，字典序即时间序，直接比字符串即可。
+
+    想看"最近三个月"不需要重跑回放——样本已经在库里，切片是零成本的。
+    """
+    if not since:
+        return df
+    return df[df["run_date"] >= since]
 
 # rank 分层的分档边界，左闭右闭，单位是 0 起的名次。
 _RANK_BUCKETS: tuple[tuple[int, int, str], ...] = (
@@ -120,6 +133,55 @@ def resonance(df: pd.DataFrame, horizons: tuple[int, ...] = (1, 3, 5, 20)) -> li
             stat = _stat(sub[sub["k"] == k], f"{int(k)} 个策略")
             if stat:
                 rows.append({"horizon": int(horizon), "k": int(k), **stat})
+    return rows
+
+
+def recency(df: pd.DataFrame, horizon: int = 1) -> list[dict]:
+    """
+    按季度拆开看每个策略的净超额，回答"这个策略最近还灵吗"。
+
+    比单独回放最近三个月强，原因有两个：
+      - 样本已经在库里，切片是零成本的，不必为一个时间窗重跑几十分钟；
+      - **有对照**。孤立地看最近三个月，没法判断 -0.3% 是策略失效了，
+        还是它一贯如此。并排放着才看得出趋势。
+
+    用净超额（已扣交易成本）而不是毛超额：短线判断"还灵不灵"，
+    毛超额为正但扣费为负的季度算不上"灵"。
+
+    Args:
+        df: DataEngine.get_returns() 的输出。
+        horizon: 在哪个持有期上看，默认 T+1。
+
+    Returns:
+        每 (策略, 季度) 一个字典，按策略、季度升序。样本不足的季度会被略过。
+    """
+    t = _tradable_only(df)
+    t = t[t["horizon"] == horizon].copy()
+    if t.empty:
+        return []
+
+    # run_date 是 'YYYY-MM-DD' 字符串，直接切片取年月即可，不必转 datetime。
+    quarter = t["run_date"].str[:4] + "Q" + (
+        (t["run_date"].str[5:7].astype(int) - 1) // 3 + 1
+    ).astype(str)
+    t["quarter"] = quarter
+
+    rows: list[dict] = []
+    for (strategy, q), group in t.groupby(["strategy", "quarter"], sort=True):
+        if len(group) < _MIN_BUCKET_N:
+            continue
+        net = group["excess_ret"] - ROUND_TRIP_COST
+        rows.append(
+            {
+                "strategy": str(strategy),
+                "quarter": str(q),
+                "horizon": int(horizon),
+                "n": int(len(group)),
+                "mean_excess": float(group["excess_ret"].mean()),
+                "mean_net_excess": float(net.mean()),
+                "net_win_rate": float((net > 0).mean()),
+            }
+        )
     return rows
 
 

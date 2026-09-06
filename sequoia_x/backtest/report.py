@@ -168,11 +168,45 @@ def _strata_table(title: str, rows: list[dict], first_col: str) -> Table:
     return table
 
 
+def _render_recency(rows: list[dict], console: Console) -> None:
+    """按季度铺开每个策略的净超额，横向一行一个策略。"""
+    quarters = sorted({row["quarter"] for row in rows})
+    by_strategy: dict[str, dict[str, dict]] = {}
+    for row in rows:
+        by_strategy.setdefault(row["strategy"], {})[row["quarter"]] = row
+
+    table = Table(
+        title="⑤ 分期对比：各季度的扣费后超额（T+1）",
+        header_style="bold",
+        title_style="bold",
+        title_justify="left",
+    )
+    table.add_column("策略", no_wrap=True)
+    for q in quarters:
+        table.add_column(q, justify="right")
+
+    for strategy in sorted(by_strategy):
+        cells = []
+        for q in quarters:
+            row = by_strategy[strategy].get(q)
+            cells.append("—" if row is None else _pct(row["mean_net_excess"]))
+        table.add_row(_short_name(strategy), *cells)
+
+    console.print(table)
+    console.print(
+        "  回答的是「这个策略最近还灵吗」。孤立地看最近一个季度没法判断——\n"
+        "  −0.3% 是失效了还是它一贯如此？并排放着才看得出趋势。\n"
+        "  空格表示该季度样本不足 30，不是零。\n"
+    )
+
+
 def render_analysis(
     rank_rows: list[dict],
     resonance_rows: list[dict],
     selectivity_rows: list[dict],
     within_rows: list[dict],
+    recency_rows: list[dict] | None = None,
+    since: str | None = None,
     console: Console | None = None,
 ) -> None:
     """
@@ -189,16 +223,22 @@ def render_analysis(
         console: rich Console，缺省新建一个。
     """
     console = console or Console(width=_CONSOLE_WIDTH)
+    recency_rows = recency_rows or []
 
-    if not any([rank_rows, resonance_rows, selectivity_rows, within_rows]):
-        console.print(
-            "\n[yellow]没有足够的收益明细可供分层分析。[/yellow]\n"
-            "先跑 `--replay` 产出样本，再跑 `--track-returns --source replay`。\n"
+    if not any(
+        [rank_rows, resonance_rows, selectivity_rows, within_rows, recency_rows]
+    ):
+        hint = (
+            f"（当前筛选 run_date >= {since}，放宽或去掉 --since 再试）\n"
+            if since
+            else "先跑 `--replay` 产出样本，再跑 `--track-returns --source replay`。\n"
         )
+        console.print(f"\n[yellow]没有足够的收益明细可供分层分析。[/yellow]\n{hint}")
         return
 
+    scope = f"  [dim]仅统计 {since} 及之后的推荐[/dim]" if since else ""
     console.print("\n[bold]分层分析[/bold]  在已算好的收益明细上切几刀，"
-                  "看有没有比「全买」更好的子集\n")
+                  f"看有没有比「全买」更好的子集{scope}\n")
 
     if rank_rows:
         console.print(_strata_table("① 按 rank 分层【对照组，预期无信号】", rank_rows, "名次"))
@@ -252,3 +292,6 @@ def render_analysis(
             "  [bold]但它救不了策略[/bold]——最好那档的超额也在单边 0.1% 的交易成本量级内，\n"
             "  且 T+20 上效应消失。它的价值是解释亏损来自哪里，不是给出能赚钱的规则。\n"
         )
+
+    if recency_rows:
+        _render_recency(recency_rows, console)

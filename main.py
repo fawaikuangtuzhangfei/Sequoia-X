@@ -69,6 +69,11 @@ def main() -> None:
         help="配合 --track-returns：清空该来源的旧收益明细后全量重算",
     )
     parser.add_argument(
+        "--since",
+        default=None,
+        help="报表只统计该日期及之后的推荐 YYYY-MM-DD，如 --since 2026-06-01",
+    )
+    parser.add_argument(
         "--analyze",
         action="store_true",
         help="在已算好的收益明细上做分层分析（rank 对照、多策略共振、选择性）",
@@ -123,7 +128,7 @@ def main() -> None:
             from sequoia_x.backtest.tracker import print_analysis
 
             logger.info(f"分层分析（source={args.source}）...")
-            print_analysis(engine, source=args.source)
+            print_analysis(engine, source=args.source, since=args.since)
             return
 
         if args.track_returns:
@@ -138,7 +143,7 @@ def main() -> None:
                 f"收益补算完成：新增 {stats.computed} 条明细，"
                 f"未到期 {stats.immature} 条"
             )
-            print_report(engine, source=args.source)
+            print_report(engine, source=args.source, since=args.since)
             return
 
         # ── 日常模式：单次 API 补今天 + 策略 + 推送 ──

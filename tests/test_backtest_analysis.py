@@ -11,11 +11,14 @@ from hypothesis import strategies as st
 
 from sequoia_x.backtest.analysis import (
     _MIN_BUCKET_N,
+    filter_since,
     rank_strata,
+    recency,
     resonance,
     selectivity,
     selectivity_within_strategy,
 )
+from sequoia_x.backtest.metrics import ROUND_TRIP_COST
 
 
 def make_returns(
@@ -153,3 +156,37 @@ def test_analysis_ignores_untradable_samples() -> None:
     assert resonance(df) == resonance(kept_only)
     assert selectivity(df) == selectivity(kept_only)
     assert selectivity_within_strategy(df) == selectivity_within_strategy(kept_only)
+
+
+# Feature: sequoia-x-v2, Property 66: 日期筛选按字典序切片且边界为闭区间
+def test_filter_since_is_inclusive_and_lexicographic() -> None:
+    """属性 66：filter_since 保留 run_date >= since 的样本，含 since 当天。
+
+    run_date 是 'YYYY-MM-DD' 字符串，字典序即时间序。写成开区间会悄悄漏掉
+    起始日整天的样本——那天的数据不会报错，只是不见了。
+    """
+    df = make_returns(n_days=20)
+    cutoff = "2024-01-10"
+
+    kept = filter_since(df, cutoff)
+
+    assert (kept["run_date"] >= cutoff).all()
+    assert (kept["run_date"] == cutoff).any(), "起始日当天必须被保留"
+    assert len(kept) < len(df), "测试数据必须有被滤掉的样本"
+    assert filter_since(df, None).equals(df), "since 为 None 时应原样返回"
+
+
+# Feature: sequoia-x-v2, Property 67: 分期对比用扣费后超额
+def test_recency_reports_net_excess() -> None:
+    """属性 67：分期对比的净超额 == 该季度毛超额均值 − 交易成本。
+
+    判断"策略最近还灵吗"必须用扣费后的数字：毛超额为正、扣费为负的季度
+    算不上"灵"，而这恰恰是短线策略最常见的状态。
+    """
+    df = make_returns(n_days=28)
+    rows = recency(df, horizon=1)
+    assert rows, "测试数据应至少产出一个季度"
+
+    for row in rows:
+        assert abs(row["mean_net_excess"] - (row["mean_excess"] - ROUND_TRIP_COST)) < 1e-12
+        assert row["quarter"].startswith("2024Q")
