@@ -72,17 +72,34 @@ def _capture_engine_logs() -> tuple[list[logging.LogRecord], logging.Handler]:
     return records, handler
 
 
-def _run_sync_with(engine: DataEngine, batch_results: list) -> tuple[int, list[logging.LogRecord]]:
+def _failed(n: int) -> list:
+    """造 n 个占位任务，用来填 worker 回传的 failed_tasks。"""
+    return [(f"{i:06d}", f"sh.{i:06d}", "2026-01-01", "2026-01-02") for i in range(n)]
+
+
+def _retry_all_fail(arg: tuple) -> tuple[list, dict]:
+    """串行补跑也全军覆没——保持"失败就是失败"的默认语义。"""
+    return [], {"ok": 0, "failed_tasks": list(arg[1])}
+
+
+def _run_sync_with(
+    engine: DataEngine, batch_results: list, retry=_retry_all_fail
+) -> tuple[int, list[logging.LogRecord]]:
     """在给定的 worker 返回值下跑一次 sync_today_bulk。
 
-    Pool 用 spawn 启动，子进程会重新 import 本模块，所以 patch
-    _bs_fetch_batch 对子进程无效——必须把整个 Pool 换掉。
+    两处 patch 的作用域不一样，别搞混：
+
+    - Pool 用 spawn 启动，子进程会重新 import 本模块，patch
+      `_bs_fetch_batch` 对**子进程**无效——必须把整个 Pool 换掉。
+    - 串行补跑跑在**父进程**里，走的是模块全局名字查找，所以 patch
+      `_bs_fetch_batch` 对它有效，也必须打上：否则测试会真的去连 baostock。
     """
     pool = MagicMock()
     pool.__enter__.return_value.map.return_value = batch_results
     records, handler = _capture_engine_logs()
     try:
-        with patch("multiprocessing.Pool", return_value=pool):
+        with patch("multiprocessing.Pool", return_value=pool), \
+             patch.object(engine_module, "_bs_fetch_batch", side_effect=retry):
             written = engine.sync_today_bulk()
     finally:
         logging.getLogger(engine_module.__name__).removeHandler(handler)
@@ -111,7 +128,7 @@ def test_total_fetch_failure_logs_error_not_no_data() -> None:
         engine, _ = make_engine_in(tmp_dir)
         _seed_one_stale_symbol(engine)
 
-        written, records = _run_sync_with(engine, [([], {"ok": 0, "failed": 250})])
+        written, records = _run_sync_with(engine, [([], {"ok": 0, "failed_tasks": _failed(250)})])
 
     assert written == 0
     errors = [r for r in records if r.levelno == logging.ERROR]
@@ -125,7 +142,7 @@ def test_genuine_non_trading_day_stays_quiet() -> None:
         engine, _ = make_engine_in(tmp_dir)
         _seed_one_stale_symbol(engine)
 
-        written, records = _run_sync_with(engine, [([], {"ok": 250, "failed": 0})])
+        written, records = _run_sync_with(engine, [([], {"ok": 250, "failed_tasks": []})])
 
     assert written == 0
     assert not [r for r in records if r.levelno >= logging.WARNING]
@@ -137,11 +154,12 @@ def test_partial_fetch_failure_warns() -> None:
         engine, _ = make_engine_in(tmp_dir)
         _seed_one_stale_symbol(engine)
 
-        written, records = _run_sync_with(engine, [([], {"ok": 200, "failed": 50})])
+        written, records = _run_sync_with(engine, [([], {"ok": 200, "failed_tasks": _failed(50)})])
 
     assert written == 0
-    warnings = [r for r in records if r.levelno == logging.WARNING]
-    assert warnings and "部分失败" in warnings[0].getMessage()
+    # 补跑那条 WARNING 排在前面，所以别断言 warnings[0]，要看整串
+    messages = [r.getMessage() for r in records if r.levelno == logging.WARNING]
+    assert any("部分失败" in m for m in messages), messages
 
 
 def _seed_bars(engine: DataEngine, symbol: str, dates: list[str]) -> None:
@@ -184,7 +202,7 @@ def test_sync_does_not_delete_other_symbols_history() -> None:
         # 本轮只有落后股 BBB 抓回了 01-04..01-10
         fetched = [["BBB", f"2026-01-{d:02d}", "1", "1", "1", "1", "100", "100"]
                    for d in range(4, 11)]
-        _run_sync_with(engine, [(fetched, {"ok": 2, "failed": 0})])
+        _run_sync_with(engine, [(fetched, {"ok": 2, "failed_tasks": []})])
 
         assert _dates_of(engine, "AAA") == fresh_dates, "健康股的历史被删掉了"
         assert _dates_of(engine, "BBB") == fresh_dates, "落后股没有补齐"
@@ -197,7 +215,7 @@ def test_sync_refreshes_a_bar_it_refetches() -> None:
         _seed_bars(engine, "AAA", ["2026-01-01"])
 
         fetched = [["AAA", "2026-01-01", "9", "9", "9", "9", "500", "500"]]
-        _run_sync_with(engine, [(fetched, {"ok": 1, "failed": 0})])
+        _run_sync_with(engine, [(fetched, {"ok": 1, "failed_tasks": []})])
 
         with closing(sqlite3.connect(engine.db_path)) as conn:
             rows = conn.execute(
@@ -205,6 +223,90 @@ def test_sync_refreshes_a_bar_it_refetches() -> None:
             ).fetchall()
     assert len(rows) == 1, "同一 (symbol, date) 出现了重复行"
     assert rows[0] == (9.0, 500.0), "重抓的数据没有覆盖旧值"
+
+
+# Feature: sequoia-x-v2, Property 74: 并行阶段失败的股票必须被单进程补跑，不能变成结构性盲区
+def test_parallel_failures_are_retried_serially() -> None:
+    """属性 74：worker 丢掉的股票要单进程补跑，并真的写进库。
+
+    分块是确定性的（`tasks[i::n_workers]`），同一只股票永远落在同一个 worker
+    上。所以 worker 挂掉时，受害的永远是那固定的一批——失败不是随机噪声，而是
+    结构性盲区：它们一天天持续落后，其余股票天天正常，汇总日志看不出任何异常。
+    生产库里 mod 8 余数为 4 的那 250 只就是这样一根新 K 线都没拿到的。
+
+    错峰登录和重试降低了失败率，但消不掉这个性质——只有把失败的股票**捞回来
+    重跑**才行。串行恰好不触发并发握手被拒这个主因。
+    """
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        engine, _ = make_engine_in(tmp_dir)
+        _seed_bars(engine, "AAA", ["2026-01-01"])
+        _seed_bars(engine, "BBB", ["2026-01-01"])
+
+        # 并行阶段：AAA 成功，BBB 整只失败
+        bbb_task = ("BBB", "sh.BBB", "2026-01-02", "2026-01-02")
+        parallel = [(
+            [["AAA", "2026-01-02", "1", "1", "1", "1", "100", "100"]],
+            {"ok": 1, "failed_tasks": [bbb_task]},
+        )]
+
+        seen: list = []
+
+        def retry_succeeds(arg: tuple) -> tuple[list, dict]:
+            seen.append(arg)
+            rows = [["BBB", "2026-01-02", "2", "2", "2", "2", "200", "200"]]
+            return rows, {"ok": 1, "failed_tasks": []}
+
+        written, records = _run_sync_with(engine, parallel, retry=retry_succeeds)
+
+        assert seen, "并行阶段有失败，却没有触发单进程补跑"
+        assert seen[0][1] == [bbb_task], "补跑收到的不是失败的那只"
+        assert seen[0][0] == 0, "补跑应以 worker 序号 0 运行，不该再错开等待"
+
+        assert _dates_of(engine, "BBB") == ["2026-01-01", "2026-01-02"], "补跑的数据没写进库"
+        assert _dates_of(engine, "AAA") == ["2026-01-01", "2026-01-02"]
+        assert written == 2
+
+    # 补跑救回来了，就不该再报"部分失败"
+    messages = [r.getMessage() for r in records if r.levelno >= logging.WARNING]
+    assert not any("部分失败" in m for m in messages), messages
+
+
+def test_serial_retry_failure_still_counts_as_failed() -> None:
+    """补跑也救不回来时，失败照旧要报出来——补跑不能把失败吞掉。"""
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        engine, _ = make_engine_in(tmp_dir)
+        _seed_one_stale_symbol(engine)
+
+        written, records = _run_sync_with(
+            engine, [([], {"ok": 200, "failed_tasks": _failed(50)})]
+        )
+
+    assert written == 0
+    messages = [r.getMessage() for r in records if r.levelno == logging.WARNING]
+    assert any("部分失败" in m and "50" in m for m in messages), messages
+
+
+# Feature: sequoia-x-v2, Property 74（续）：连续失败要熔断，别空转等超时
+def test_worker_stops_after_consecutive_failures() -> None:
+    """数据源挂掉时，worker 连续失败到阈值就停手，剩下的整批记为失败。
+
+    没有这道闸，串行补跑会逐个空等超时——生产上 2000 只每只十几秒，
+    整轮同步会拖到天亮。剩下的记为失败是诚实的：它们确实没拿到。
+    """
+    bs = MagicMock()
+    bs.login.return_value = MagicMock(error_code="0")
+    bs.query_history_k_data_plus.return_value = MagicMock(error_code="10001")
+
+    n = engine_module._CONSECUTIVE_FAILURE_LIMIT + 30
+    tasks = _failed(n)
+
+    with patch.dict("sys.modules", {"baostock": bs}), patch("time.sleep"):
+        rows, stats = engine_module._bs_fetch_batch((0, tasks))
+
+    assert rows == []
+    assert len(stats["failed_tasks"]) == n, "熔断后剩下的股票没有被记为失败"
+    assert bs.query_history_k_data_plus.call_count == engine_module._CONSECUTIVE_FAILURE_LIMIT, \
+        "熔断没生效，仍在逐个查询"
 
 
 def _seed_stale_symbols(engine: DataEngine, n: int) -> None:
@@ -241,7 +343,7 @@ def test_sync_worker_count_comes_from_settings(configured: int) -> None:
         _seed_stale_symbols(engine, n_symbols)
 
         pool = MagicMock()
-        pool.__enter__.return_value.map.return_value = [([], {"ok": 1, "failed": 0})]
+        pool.__enter__.return_value.map.return_value = [([], {"ok": 1, "failed_tasks": []})]
         with patch("multiprocessing.Pool", return_value=pool) as mock_pool:
             engine.sync_today_bulk()
 
