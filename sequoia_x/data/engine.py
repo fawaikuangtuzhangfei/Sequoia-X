@@ -151,7 +151,11 @@ _PICK_TABLES: dict[str, str] = {
     "replay": "selection_replay",
 }
 
-# stock_daily 的可读列白名单，get_market_ohlcv 用它校验调用方请求的列名。
+# stock_daily 的业务列，顺序与 INSERT 语句一一对应，
+# 同时充当 get_market_ohlcv 校验调用方列名的白名单。
+#
+# 这里只能有一份。合并两条分支时两侧各自加过一份内容相同的列清单，
+# 往 stock_daily 加一列时只改其中一份，另一份会静默地少一列。
 _MARKET_COLUMNS: tuple[str, ...] = (
     "symbol",
     "date",
@@ -162,9 +166,50 @@ _MARKET_COLUMNS: tuple[str, ...] = (
     "volume",
     "turnover",
 )
+_OHLCV_COLUMNS = list(_MARKET_COLUMNS)
+_OHLCV_NUMERIC_COLUMNS = [c for c in _OHLCV_COLUMNS if c not in ("symbol", "date")]
 
 
-def _bs_fetch_batch(tasks: list) -> tuple[list, dict[str, int]]:
+# worker 之间错开登录的间隔（秒）。实测所有 worker 同一瞬间握手时
+# baostock 会把它们全部拒掉，错开首次连接是最省事的规避方式。
+_LOGIN_STAGGER_SECONDS = 0.8
+# 登录失败后的退避基数（秒），按 2 的幂增长
+_LOGIN_BACKOFF_BASE = 2.0
+_LOGIN_ATTEMPTS = 3
+
+
+def _bs_login_with_retry(bs, worker_index: int, attempts: int = _LOGIN_ATTEMPTS) -> bool:
+    """错开并重试 baostock 登录，返回是否成功。
+
+    登录失败过去是一锤子买卖：一次 `bs.login()` 不通，这个 worker 负责的
+    几百只股票就全部记为失败。实测的失败形态恰恰是"N 个 worker 同时握手
+    被集体拒绝"——这种失败重试一下大概率就过了，不该直接放弃。
+
+    Args:
+        bs: 已导入的 baostock 模块（由调用方传入，便于测试替换）。
+        worker_index: worker 序号，用于错开首次连接和退避时长。
+        attempts: 总尝试次数。
+
+    Returns:
+        True 表示登录成功。
+    """
+    import time
+
+    # 首次连接按序号错开，避免 N 个进程撞在同一毫秒
+    if worker_index:
+        time.sleep(worker_index * _LOGIN_STAGGER_SECONDS)
+
+    for attempt in range(attempts):
+        lg = bs.login()
+        if lg.error_code == "0":
+            return True
+        if attempt < attempts - 1:
+            # 退避时长也掺进 worker_index，避免重试时再次集体撞车
+            time.sleep(_LOGIN_BACKOFF_BASE * (2**attempt) + worker_index * _LOGIN_STAGGER_SECONDS)
+    return False
+
+
+def _bs_fetch_batch(arg: tuple[int, list]) -> tuple[list, dict[str, int]]:
     """多进程 worker：独立 login，批量拉取 baostock 数据。
 
     **必须把失败计数回传给父进程。** 这些 worker 跑在独立进程里，它们的日志
@@ -175,16 +220,20 @@ def _bs_fetch_batch(tasks: list) -> tuple[list, dict[str, int]]:
     逐个超时，父进程照常记一条 INFO"无新数据（可能非交易日）"。cron 每天
     这样跑，策略会一直用过期数据选股，而没有任何告警。
 
+    Args:
+        arg: `(worker 序号, 任务列表)`。序号只用于错开登录时机——`Pool.map`
+            只能传一个参数，所以打包成元组。
+
     Returns:
         (数据行, {"ok": 成功只数, "failed": 失败只数})。
     """
     import baostock as bs
 
+    worker_index, tasks = arg
     stats = {"ok": 0, "failed": 0}
 
-    lg = bs.login()
-    if lg.error_code != "0":
-        # 连不上就别再逐只重试了，整批直接记为失败
+    if not _bs_login_with_retry(bs, worker_index):
+        # 重试过仍连不上，就别再逐只查了，整批直接记为失败
         stats["failed"] = len(tasks)
         return [], stats
 
@@ -217,6 +266,7 @@ class DataEngine:
     def __init__(self, settings: Settings) -> None:
         self.db_path: str = settings.db_path
         self.start_date: str = settings.start_date
+        self.sync_workers: int = settings.sync_workers
         self._init_db()
 
     def _init_db(self) -> None:
@@ -291,10 +341,11 @@ class DataEngine:
             logger.info("所有股票已是最新，无需更新")
             return 0
 
-        logger.info(f"需要更新 {len(tasks)} 只股票，启动多进程并行拉取...")
+        n_workers = min(self.sync_workers, len(tasks))
+        logger.info(f"需要更新 {len(tasks)} 只股票，启动 {n_workers} 个进程并行拉取...")
 
-        n_workers = min(8, len(tasks))
-        chunks = [tasks[i::n_workers] for i in range(n_workers)]
+        # 带上 worker 序号，worker 用它错开登录时机（见 _bs_login_with_retry）
+        chunks = [(i, tasks[i::n_workers]) for i in range(n_workers)]
 
         with Pool(n_workers) as pool:
             batch_results = pool.map(_bs_fetch_batch, chunks)
@@ -323,17 +374,32 @@ class DataEngine:
             logger.info(f"无新数据，可能是非交易日（{n_ok} 只查询成功但都没有新 K 线）")
             return 0
 
-        df = pd.DataFrame(all_rows, columns=["symbol", "date", "open", "high", "low", "close", "volume", "turnover"])
-        for col in ["open", "high", "low", "close", "volume", "turnover"]:
+        df = pd.DataFrame(all_rows, columns=_OHLCV_COLUMNS)
+        for col in _OHLCV_NUMERIC_COLUMNS:
             df[col] = pd.to_numeric(df[col], errors="coerce")
         df = df.dropna(subset=["close"])
         df = df[df["volume"] > 0]
 
         count = len(df)
+        # 按 (symbol, date) 精确覆盖，绝不按日期整片删。
+        #
+        # 这里曾经是「先 DELETE 掉 df 里出现过的每一个日期，再整体 append」。
+        # 那等于删掉那一天**所有股票**的数据，却只写回本次抓到的那一批。
+        # 日常同步时所有股票都只抓当天，unique() 只有一个日期，删了又全写回，
+        # 看不出问题；可只要各股票的 last_date 参差不齐——任何一次部分失败之后
+        # 必然如此——抓回来的日期就横跨数月，删除范围远大于写回范围，
+        # 健康股那几个月的历史被整段抹掉，而且不会补回来。
+        #
+        # 这是个失败放大器：一次同步失败造成参差，下一次同步就把好数据删掉，
+        # 参差进一步扩大。实测后果是全市场 2000 只在 2026-05-12..09-02 被挖空，
+        # 持续四个月，日志上却始终是"运行完成"。Property 73 锁住这条。
         with _connect(self.db_path) as conn:
-            for d in df["date"].unique().tolist():
-                conn.execute("DELETE FROM stock_daily WHERE date = ?", (d,))
-            df.to_sql("stock_daily", conn, if_exists="append", index=False, method="multi", chunksize=500)
+            conn.executemany(
+                "INSERT OR REPLACE INTO stock_daily "
+                "(symbol, date, open, high, low, close, volume, turnover) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                df[_OHLCV_COLUMNS].itertuples(index=False, name=None),
+            )
             conn.commit()
 
         logger.info(f"sync_today_bulk: 写入 {count} 条数据")

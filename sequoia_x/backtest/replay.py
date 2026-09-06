@@ -26,9 +26,9 @@ logger = get_logger(__name__)
 class _ReplayTurtleTradeStrategy(TurtleTradeStrategy):
     """回放专用的海龟策略：保留选股，跳过流通市值排序。
 
-    原版排序要向 baostock 查**当天**的不复权价与换手率
-    （`turtle_trade.py` 里写死了 `date.today()`），历史日期既拿不到那份数据，
-    也不该在回放里打网络。
+    原版排序要向 baostock 查决策日的不复权价与换手率。这是一次网络请求，
+    而回放绝不该打网络——`AsOfEngine` 连 baostock 的入口都不暴露
+    （属性 58），排序这一步是唯一还会绕过它的地方。
 
     覆盖 `_get_market_caps` 返回空字典后，`run()` 里的
     `candidates.sort(key=lambda s: market_caps.get(s, 0), reverse=True)`
@@ -37,11 +37,18 @@ class _ReplayTurtleTradeStrategy(TurtleTradeStrategy):
 
     **报表里必须标注**：该策略的回放结果不含市值排序，rank 的含义与实盘不同。
 
+    **签名必须跟着父类走。** 父类调用的是 `_get_market_caps(candidates, as_of)`；
+    少一个参数就是 TypeError，而 `replay_range` 会把它吞成一行警告，
+    表现为海龟在整段回放里一只都选不出来。属性 57 守着这个。
+
+    父类在市值全空时会记一条 WARNING 说"排序未生效"——在回放里那是**预期行为**，
+    每个回放日各一条。不要去追它。
+
     这个类刻意放在 backtest 层而不是 strategy 包里：
     它不是一个可用于实盘的策略，不该出现在注册表和策略说明页上。
     """
 
-    def _get_market_caps(self, symbols: list[str]) -> dict[str, float]:
+    def _get_market_caps(self, symbols: list[str], as_of: str) -> dict[str, float]:
         """回放不查市值，返回空字典让排序退化为恒等变换。"""
         return {}
 

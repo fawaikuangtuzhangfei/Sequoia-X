@@ -1,5 +1,6 @@
 """配置管理模块：通过 pydantic-settings 从环境变量或 .env 文件加载系统配置。"""
 
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -8,6 +9,12 @@ class Settings(BaseSettings):
     start_date: str = "2024-01-01"
     feishu_webhook_url: str  # 必填字段，缺失时抛出 ValidationError
     strategy_webhooks: dict[str, str] = {}
+
+    # sync_today_bulk 的并发进程数。默认 4 而非 8：实测 8 个 worker 同时
+    # 握手时 baostock 全部拒绝，2000 次查询逐个超时。降到 4 大约多花 75 秒
+    # （盘后 cron 无时间压力），换来的是同步不再整轮失败。
+    # 不同机器的网络差异很大，所以做成可配置而不是写死。
+    sync_workers: int = Field(default=4, ge=1, le=16)
 
     model_config = SettingsConfigDict(
         env_file=".env",
