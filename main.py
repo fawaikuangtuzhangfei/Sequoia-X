@@ -68,6 +68,11 @@ def main() -> None:
         action="store_true",
         help="配合 --track-returns：清空该来源的旧收益明细后全量重算",
     )
+    parser.add_argument(
+        "--analyze",
+        action="store_true",
+        help="在已算好的收益明细上做分层分析（rank 对照、多策略共振、选择性）",
+    )
     args = parser.parse_args()
 
     try:
@@ -111,6 +116,14 @@ def main() -> None:
             )
             logger.info(f"Sequoia-X V2 回放完成，共写入 {picks} 条历史选股样本")
             logger.info("接着跑 `python main.py --track-returns --source replay` 出收益")
+            return
+
+        if args.analyze:
+            # ── 分层分析模式：只读已落库的收益明细，不重算 ──
+            from sequoia_x.backtest.tracker import print_analysis
+
+            logger.info(f"分层分析（source={args.source}）...")
+            print_analysis(engine, source=args.source)
             return
 
         if args.track_returns:

@@ -129,3 +129,115 @@ def render_summary(
     for i, caveat in enumerate(_CAVEATS, 1):
         console.print(f"  {i}. {caveat}", highlight=False)
     console.print()
+
+
+def _strata_table(title: str, rows: list[dict], first_col: str) -> Table:
+    """把一组分层统计渲染成表格。"""
+    table = Table(title=title, header_style="bold", title_style="bold", title_justify="left")
+    table.add_column("持有", justify="right")
+    table.add_column(first_col, no_wrap=True)
+    table.add_column("样本", justify="right")
+    table.add_column("平均超额", justify="right")
+    table.add_column("超额胜率", justify="right")
+    table.add_column("平均收益", justify="right")
+
+    last_horizon = None
+    for row in rows:
+        if last_horizon is not None and row["horizon"] != last_horizon:
+            table.add_section()
+        last_horizon = row["horizon"]
+        table.add_row(
+            f"T+{row['horizon']}",
+            row["bucket"],
+            str(row["n"]),
+            _pct(row["mean_excess"]),
+            _rate(row["excess_win_rate"]),
+            _pct(row["mean_ret"]),
+        )
+    return table
+
+
+def render_analysis(
+    rank_rows: list[dict],
+    resonance_rows: list[dict],
+    selectivity_rows: list[dict],
+    within_rows: list[dict],
+    console: Console | None = None,
+) -> None:
+    """
+    打印分层分析报表。
+
+    每张表上面都写清楚它是什么、该怎么读——尤其第一张是**对照组**。
+    一张没有解读的分层表最容易被当成"发现了信号"。
+
+    Args:
+        rank_rows: analysis.rank_strata 的输出。
+        resonance_rows: analysis.resonance 的输出。
+        selectivity_rows: analysis.selectivity 的输出。
+        within_rows: analysis.selectivity_within_strategy 的输出。
+        console: rich Console，缺省新建一个。
+    """
+    console = console or Console(width=_CONSOLE_WIDTH)
+
+    if not any([rank_rows, resonance_rows, selectivity_rows, within_rows]):
+        console.print(
+            "\n[yellow]没有足够的收益明细可供分层分析。[/yellow]\n"
+            "先跑 `--replay` 产出样本，再跑 `--track-returns --source replay`。\n"
+        )
+        return
+
+    console.print("\n[bold]分层分析[/bold]  在已算好的收益明细上切几刀，"
+                  "看有没有比「全买」更好的子集\n")
+
+    if rank_rows:
+        console.print(_strata_table("① 按 rank 分层【对照组，预期无信号】", rank_rows, "名次"))
+        console.print(
+            "  回放里 rank 不携带信息：五个策略自称「未排序，按代码遍历顺序」，"
+            "海龟的市值\n  排序在回放中被禁用。这里**不该**出现跨持有期一致的效应；"
+            "若出现，先怀疑\n  收益计算漏了未来数据。实测 T+1 与 T+20 符号相反，"
+            "测到的是板块而非选股质量。\n"
+        )
+
+    if resonance_rows:
+        table = _strata_table("② 多策略共振", resonance_rows, "同时选中")
+        console.print(table)
+        console.print(
+            "  [bold]结论与直觉相反：共振越强表现越差，且各持有期单调一致。[/bold]\n"
+            "  前端的「多策略共振」功能据此需要修正措辞——它目前把人往更差的票上引。\n"
+        )
+
+    if selectivity_rows:
+        console.print(_strata_table("③ 选择性：策略当天选出多少只", selectivity_rows, "当天选出"))
+        console.print("  跨策略比较会有混淆，决定性的是下面这张策略内部对照。\n")
+
+    if within_rows:
+        table = Table(
+            title="④ 策略内部对照：按各自当日选股数的中位数切两半（决定性检验）",
+            header_style="bold",
+            title_style="bold",
+            title_justify="left",
+        )
+        table.add_column("策略", no_wrap=True)
+        table.add_column("中位", justify="right")
+        table.add_column("少的日子", justify="right")
+        table.add_column("样本", justify="right")
+        table.add_column("多的日子", justify="right")
+        table.add_column("样本", justify="right")
+        table.add_column("差", justify="right")
+        for row in within_rows:
+            table.add_row(
+                _short_name(row["strategy"]),
+                f"{row['median_picks']:.0f}",
+                _pct(row["few_excess"]),
+                str(row["few_n"]),
+                _pct(row["many_excess"]),
+                str(row["many_n"]),
+                f"{row['spread'] * 100:+.2f}pp",
+            )
+        console.print(table)
+        console.print(
+            "  差为正 = 选得少的日子表现更好。信号数量像是市场情绪的代理：\n"
+            "  几百只同时触发突破的日子是亢奋日，买在了顶上。\n"
+            "  [bold]但它救不了策略[/bold]——最好那档的超额也在单边 0.1% 的交易成本量级内，\n"
+            "  且 T+20 上效应消失。它的价值是解释亏损来自哪里，不是给出能赚钱的规则。\n"
+        )

@@ -7,9 +7,15 @@ compute_returns 刻意不查表（它只吃三元组），所以"从哪张表取
 
 from collections.abc import Sequence
 
+from sequoia_x.backtest.analysis import (
+    rank_strata,
+    resonance,
+    selectivity,
+    selectivity_within_strategy,
+)
 from sequoia_x.backtest.benchmark import refresh_benchmark, warn_thin_coverage
 from sequoia_x.backtest.metrics import overall, summarize
-from sequoia_x.backtest.report import render_summary
+from sequoia_x.backtest.report import render_analysis, render_summary
 from sequoia_x.backtest.returns import DEFAULT_HORIZONS, ComputeStats, compute_returns
 from sequoia_x.core.logger import get_logger
 from sequoia_x.data.engine import DataEngine
@@ -68,3 +74,24 @@ def print_report(engine: DataEngine, source: str = "live") -> None:
     df = engine.get_returns(source)
     coverage = engine.get_return_coverage(source)
     render_summary(summarize(df), overall(df), coverage, source)
+
+
+def print_analysis(engine: DataEngine, source: str = "replay") -> None:
+    """
+    读出收益明细并打印分层分析报表。
+
+    与 print_report 分开：主报表回答"策略整体赚不赚钱"，
+    分层分析回答"有没有哪一部分是赚钱的"。两者受众和读法都不同，
+    塞进一张表只会让人两个都读不进去。
+
+    Args:
+        engine: 数据引擎。
+        source: 'live' 或 'replay'。默认 replay——实盘样本量长期不足以分层。
+    """
+    df = engine.get_returns(source)
+    render_analysis(
+        rank_strata(df),
+        resonance(df),
+        selectivity(df),
+        selectivity_within_strategy(df),
+    )

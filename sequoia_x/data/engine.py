@@ -1054,22 +1054,37 @@ class DataEngine:
 
     def get_returns(self, source: str) -> pd.DataFrame:
         """
-        读出某个 source 的全部收益明细，供指标汇总使用。
+        读出某个 source 的全部收益明细，供指标汇总与分层分析使用。
 
         必须带 source 过滤：实盘与回放混在一起平均出来的数字没有任何意义。
+
+        用 LEFT JOIN 带出选股时的 rank：分层分析要用它，而 rank 只存在选股表里。
+        用 LEFT JOIN 而非 INNER，是为了让"选股记录被删了但收益还在"这种不一致
+        表现为 rank 为空，而不是整行凭空消失。
 
         Args:
             source: 'live' 或 'replay'。
 
         Returns:
-            含 strategy / horizon / ret / bench_ret / excess_ret / tradable
-            等列的 DataFrame；无数据时为空 DataFrame。
+            含 strategy / horizon / ret / bench_ret / excess_ret / tradable /
+            rank 等列的 DataFrame；无数据时为空 DataFrame。
+
+        Raises:
+            ValueError: source 不是 'live' 或 'replay' 时抛出。
         """
+        table = _PICK_TABLES.get(source)
+        if table is None:
+            raise ValueError(f"未知的 source：{source}")
+
         with _connect(self.db_path) as conn:
             df = pd.read_sql(
-                "SELECT run_date, strategy, symbol, horizon, buy_date, sell_date, "
-                "       ret, bench_ret, excess_ret, tradable "
-                "FROM selection_return WHERE source = ?",
+                "SELECT r.run_date, r.strategy, r.symbol, r.horizon, "
+                "       r.buy_date, r.sell_date, "
+                "       r.ret, r.bench_ret, r.excess_ret, r.tradable, p.rank "
+                f"FROM selection_return r LEFT JOIN {table} p "
+                "  ON p.run_date = r.run_date AND p.strategy = r.strategy "
+                "  AND p.symbol = r.symbol "
+                "WHERE r.source = ?",
                 conn,
                 params=(source,),
             )
