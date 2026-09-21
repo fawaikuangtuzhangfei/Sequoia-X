@@ -183,6 +183,77 @@ _LOGIN_ATTEMPTS = 3
 _CONSECUTIVE_FAILURE_LIMIT = 20
 
 
+# baostock 收包的 socket 超时（秒）。注意它只兜「对端沉默但没断开」那种
+# 阻塞型卡死，兜不住 EOF 空转——两者成因不同，必须分开治，见下方类文档。
+_BS_SOCKET_TIMEOUT = 30.0
+
+
+class _EOFGuardSocket:
+    """给 baostock 的 socket 包一层，把「对端已关闭」翻译成异常。
+
+    baostock 的 `send_msg`（`baostock/util/socketutil.py`）是这样收包的：
+
+        receive = b""
+        while True:
+            recv = default_socket.recv(8192)
+            receive += recv
+            if receive[-13:] == b"<![CDATA[]]>\\n":
+                break
+
+    既没设超时，也没判 EOF。对端一旦关闭连接，`recv()` 会**立刻且永远**返回
+    空 bytes，`receive` 不再增长、结束条件永不成立——整个进程就此陷入 100%
+    CPU 的死循环，不报错、不退出、也不超时。2026-09-21 实测抓到两个这样的
+    僵尸进程（9/10 与 9/15 两次定时任务），分别空转 11 天和 6 天，各占满一个
+    核，把 4 核机器烧掉了一半。
+
+    ⚠️ `socket.settimeout()` 治不了这个：EOF 时 `recv()` 根本不阻塞，超时永远
+    不会触发，只有显式判空才行。超时另有用处（对端沉默但没发 FIN 的阻塞型
+    卡死，表现为进程 S 状态 + 0% CPU），所以 `_install_socket_guard` 两道都上。
+
+    抛异常后的去向是安全的：`send_msg` 外层包着 `except Exception` → 返回 None
+    → `history.py` 置 `error_code = BSERR_RECVSOCK_FAIL` → 本模块按「这一只
+    失败」正常计数，连续失败满 `_CONSECUTIVE_FAILURE_LIMIT` 就停手。
+    """
+
+    def __init__(self, sock) -> None:
+        self._sock = sock
+
+    def recv(self, *args, **kwargs):
+        data = self._sock.recv(*args, **kwargs)
+        if not data:
+            raise ConnectionResetError("baostock 对端已关闭连接（recv 返回空）")
+        return data
+
+    def __getattr__(self, name):
+        # 其余方法（send/close/settimeout...）原样转发给真 socket
+        return getattr(self._sock, name)
+
+
+def _install_socket_guard() -> None:
+    """给刚建立的 baostock 连接装上超时 + EOF 防护。
+
+    baostock 把当前连接放在模块级全局 `baostock.common.context.default_socket`
+    （由 `socketutil.py` 用 `setattr` 写入），所以登录成功后就地换成包装对象。
+    幂等：重复调用不会套娃。
+    """
+    try:
+        import baostock.common.context as bs_context
+    except ImportError:  # pragma: no cover - baostock 缺席时不该拦住调用方
+        return
+
+    sock = getattr(bs_context, "default_socket", None)
+    if sock is None or isinstance(sock, _EOFGuardSocket):
+        return
+
+    try:
+        sock.settimeout(_BS_SOCKET_TIMEOUT)
+    except OSError:
+        # 设超时失败不致命，EOF 防护才是主力，继续装
+        pass
+
+    setattr(bs_context, "default_socket", _EOFGuardSocket(sock))
+
+
 def _bs_login_with_retry(bs, worker_index: int, attempts: int = _LOGIN_ATTEMPTS) -> bool:
     """错开并重试 baostock 登录，返回是否成功。
 
@@ -207,6 +278,7 @@ def _bs_login_with_retry(bs, worker_index: int, attempts: int = _LOGIN_ATTEMPTS)
     for attempt in range(attempts):
         lg = bs.login()
         if lg.error_code == "0":
+            _install_socket_guard()
             return True
         if attempt < attempts - 1:
             # 退避时长也掺进 worker_index，避免重试时再次集体撞车
