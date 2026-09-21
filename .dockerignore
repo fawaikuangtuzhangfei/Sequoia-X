@@ -1,0 +1,16 @@
+# 构建上下文只需要 pyproject.toml，其余全排除。
+# data/ 里的 SQLite 有 600MB+，venv/node_modules 同样巨大，
+# 不排除会让每次 build 都传输 GB 级上下文。
+.git
+venv
+data
+backups
+logs
+build
+frontend/node_modules
+frontend/dist
+**/__pycache__
+*.pyc
+.env
+.env.*
+tests
